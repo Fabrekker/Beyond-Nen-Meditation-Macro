@@ -1,0 +1,56 @@
+name: Publish macro release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - version.json
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-macro-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify updater
+        run: python check_updater.py
+      - name: Build release assets
+        shell: bash
+        run: |
+          VERSION=$(python -c 'import json; print(json.load(open("version.json"))["version"])')
+          python make_release.py --version "$VERSION" --repo "$GITHUB_REPOSITORY"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="v$RELEASE_VERSION"
+          if gh release view "$TAG" --json isDraft > release-state.json 2>/dev/null; then
+            if python -c 'import json,sys; sys.exit(0 if json.load(open("release-state.json"))["isDraft"] else 1)'; then
+              echo "Resuming the existing draft release."
+            else
+              echo "This version is already published. Increase version.json for a new release."
+              exit 0
+            fi
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" \
+              --title "Beyond Nen Macro $RELEASE_VERSION" --notes-file RELEASE_NOTES.md
+          fi
+          gh release upload "$TAG" --clobber \
+            "releases/$RELEASE_VERSION/nen-macro-$RELEASE_VERSION.zip" \
+            "releases/$RELEASE_VERSION/nen-macro-$RELEASE_VERSION-update.zip" \
+            "releases/$RELEASE_VERSION/update.json"
+          gh release edit "$TAG" --draft=false --latest \
+            --title "Beyond Nen Macro $RELEASE_VERSION" --notes-file RELEASE_NOTES.md

@@ -1,0 +1,13 @@
+packages/
+.venv/
+__pycache__/
+.test-output/
+.updates/
+releases/
+config.json
+events.jsonl
+instance.lock
+.dependencies.sha256
+local-python.txt
+*.png
+replay.csv
