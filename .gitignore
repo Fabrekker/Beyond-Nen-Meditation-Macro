@@ -11,3 +11,11 @@ instance.lock
 local-python.txt
 *.png
 replay.csv
+PENDING_CHANGES.md
+LOGS.jsonl
+icon-generation-prompt.txt
+*.ico
+*.csv
+live_*.py
+check_*.py
+!check_updater.py

@@ -6,6 +6,21 @@ import cv2
 import numpy as np
 
 
+def feedback_search_rect(game,client=None):
+    """Search only the feedback side of the game, even in full-screen capture."""
+    left,top=game['left'],game['top']
+    right,bottom=left+game['width'],top+game['height']
+    if client:
+        left=max(left,client['left']); top=max(top,client['top'])
+        right=min(right,client['left']+client['width'])
+        bottom=min(bottom,client['top']+client['height'])
+    if right<=left or bottom<=top:
+        return None
+    width,height=right-left,bottom-top
+    x=left+int(width*.65); y=top+int(height*.25)
+    return {'left':x,'top':y,'width':right-x,'height':max(1,int(height*.60))}
+
+
 def masks(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(hsv, (17, 105, 100), (40, 255, 255))
@@ -114,7 +129,7 @@ class Track:
             self.history.append((now, ring))
 
     def remaining(self, now):
-        points = [(t,r) for t,r in self.history if now-t < .40]
+        points = [(t,r) for t,r in self.history if now-t < .55]
         if len(points)<4 or points[-1][0]-points[0][0]<.045:
             return None
         ts, rs = np.array(points).T
@@ -173,8 +188,6 @@ class Detector:
             chosen=max(confirmed,key=lambda t:len(t.history))
             self.hue=chosen.hue
             self.last_color_seen=now
-        elif now-self.last_color_seen>8:
-            self.hue=None
         return [t for t in self.tracks if self.hue is not None and hue_distance(t.hue,self.hue)<=12]
 
 
@@ -224,3 +237,169 @@ class Tuner:
                 break
         self.previous = score
         return f'Recalibrating: lead {self.lead_ms:+.1f} ms'
+
+
+@dataclass
+class ShuBar:
+    left: float
+    right: float
+    top: float
+    bottom: float
+    zone_left: float
+    zone_right: float
+    marker: float
+    focus: float | None = None
+
+
+def detect_shu(frame):
+    """Match the white indicator, rectangular target and long bar together."""
+    height,width=frame.shape[:2]
+    hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+    white=cv2.inRange(hsv,(0,0,210),(179,65,255))
+    white[:int(height*.40)]=0
+    white[int(height*.85):]=0
+    white[:,:int(width*.15)]=0
+    white[:,int(width*.85):]=0
+    contours,_=cv2.findContours(white,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    candidates=[]
+    for contour in contours:
+        x,y,w,h=cv2.boundingRect(contour)
+        if not max(7,height*.012)<=h<=height*.075 or not 1<=w<=max(8,width*.012) or h<2.5*w:
+            continue
+        if cv2.contourArea(contour)<max(4,w*h*.45):
+            continue
+        # The HUD is centered; its translucent border can disappear against
+        # the aura, so match the dark strip and both foreground controls.
+        left,right=int(width*.30),int(width*.70)
+        if not left<=x<=right:continue
+        if np.mean(hsv[y:y+h,left:right,2]<105)<.45:continue
+        strip=hsv[y:y+h,left:right+1]
+        colored=(strip[:,:,0]>=12)&(strip[:,:,0]<=45)&(strip[:,:,1]>=65)&(strip[:,:,2]>=100)
+        colored[:,max(0,x-left):min(colored.shape[1],x+w-left)]=True
+        columns=np.flatnonzero(colored.mean(axis=0)>.75)
+        groups=np.split(columns,np.flatnonzero(np.diff(columns)>1)+1)
+        groups=[g for g in groups if width*.018<=len(g)<=width*.14]
+        for group in groups:
+            zl,zr=left+int(group[0]),left+int(group[-1])+1
+            center=(left+right)/2
+            focus=None
+            # The focus meter is a separate slim green bar below the control.
+            fy0=min(height,y+h+max(2,int(h*.25)))
+            fy1=min(height,y+h+int(h*2.2))
+            focus_mask=cv2.inRange(hsv[fy0:fy1],(40,130,90),(90,255,255))
+            fc,_=cv2.findContours(focus_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+            for c in fc:
+                fx,fy,fw,fh=cv2.boundingRect(c)
+                if (right-left)*.07<fw<(right-left)*.9 and 1<=fh<=h*.8 and abs(fx-center)<(right-left)*.5:
+                    full=2*(center-fx)
+                    if full>fw*.95:focus=float(np.clip(fw/full,0,1));break
+            if focus is None:
+                # At reset there is no green fill. Verify the actual dark
+                # meter interior instead of treating every missing fill as 0.
+                mx0=max(0,round(center-(right-left)*.355))
+                mx1=min(width,round(center+(right-left)*.355))
+                my=round(y+h*1.9)
+                meter=hsv[max(0,my-1):min(height,my+2),mx0:mx1]
+                if meter.size:
+                    green=(meter[:,:,0]>=40)&(meter[:,:,0]<=90)&(meter[:,:,1]>=130)&(meter[:,:,2]>=90)
+                    neutral=(meter[:,:,1]<110)&(meter[:,:,2]>10)&(meter[:,:,2]<70)
+                    if np.mean(green|neutral)>.95:
+                        focus=float(np.mean(green.mean(axis=0)>.5))
+            candidates.append((right-left,ShuBar(left,right,y,y+h,zl,zr,x+w/2,focus)))
+    return max(candidates,key=lambda c:c[0])[1] if candidates else None
+
+
+class ShuController:
+    def __init__(self):
+        self.previous=None
+        self.velocity=0.
+        self.holding=False
+        self.cycles=0
+        self.peak_focus=0.
+
+    def update(self,bar,now):
+        if bar is None:
+            self.previous=None
+            self.velocity=0.
+            self.holding=False
+            return False
+        if self.previous:
+            stamp,position=self.previous
+            dt=now-stamp
+            if .005<dt<.25:
+                self.velocity=.6*self.velocity+.4*(bar.marker-position)/dt
+        self.previous=(now,bar.marker)
+        center=(bar.zone_left+bar.zone_right)/2
+        deadband=max(1.5,(bar.zone_right-bar.zone_left)*.12)
+        predicted=bar.marker+self.velocity*.070
+        if predicted<center-deadband:self.holding=True
+        elif predicted>center+deadband:self.holding=False
+        if bar.focus is not None:
+            if self.peak_focus>=.97 and bar.focus<.2:
+                self.cycles+=1
+                self.peak_focus=bar.focus
+            else:self.peak_focus=max(self.peak_focus,bar.focus)
+        return self.holding
+
+
+@dataclass
+class EnPrompt:
+    rect: tuple
+    image: np.ndarray
+    signature: np.ndarray
+    glyph: np.ndarray
+    label: np.ndarray
+
+
+def detect_en_prompt(frame):
+    """Require a large light glyph, small label and red deadline strip together."""
+    height,width=frame.shape[:2]
+    hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+    white=cv2.inRange(hsv,(0,0,185),(179,90,255))
+    white[:int(height*.15)]=0
+    white[int(height*.78):]=0
+    white[:,:int(width*.40)]=0
+    contours,_=cv2.findContours(white,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    candidates=[]
+    for c in contours:
+        x,y,w,h=cv2.boundingRect(c)
+        if not height*.035<=h<=height*.10 or not h*.12<=w<=h*1.5:continue
+        cx=x+w/2
+        x0=max(0,round(cx-h*1.05));x1=min(width,round(cx+h*1.05))
+        y0=max(0,round(y-h*.18));y1=min(height,round(y+h*2.05))
+        below=hsv[round(y+h*1.5):y1,x0:x1]
+        if not below.size:continue
+        red=((below[:,:,0]<8)|(below[:,:,0]>172))&(below[:,:,1]>150)&(below[:,:,2]>85)
+        rc,_=cv2.findContours(red.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        if not any(rw>=h*.15 and 1<=rh<=h*.35 and rw>rh*1.5 for _,_,rw,rh in map(cv2.boundingRect,rc)):continue
+        label=white[round(y+h*1.25):round(y+h*1.7),x0:x1]
+        if np.count_nonzero(label)<h*.4:continue
+        signature=cv2.resize(white[y:y+h,x:x+w],(24,32),interpolation=cv2.INTER_AREA)>100
+        candidates.append(EnPrompt((x0,y0,x1,y1),frame[y0:y1,x0:x1].copy(),signature,
+                                   frame[max(0,y-3):min(height,y+h+3),max(0,x-4):min(width,x+w+4)].copy(),
+                                   frame[round(y+h*1.25):round(y+h*1.7),x0:x1].copy()))
+    return candidates[0] if len(candidates)==1 else None
+
+
+def parse_en_key(rows):
+    """Only accept a single high-confidence letter above a verified PRESS label."""
+    labels=[r for r in (rows or []) if str(r[1]).strip().upper()=='PRESS' and float(r[2])>=.90]
+    if len(labels)!=1:return None
+    label=labels[0]
+    ly=float(np.mean(np.asarray(label[0])[:,1]))
+    keys=[r for r in rows if re.fullmatch('[A-Z]',str(r[1]).strip()) and float(r[2])>=.94
+          and float(np.max(np.asarray(r[0])[:,1]))<ly]
+    return str(keys[0][1]).strip() if len(keys)==1 else None
+
+
+def recognize_en(engine,images):
+    """Recognition-only crops avoid full-scene text detection latency."""
+    readings=[]
+    for image in images:
+        enlarged=cv2.resize(image,None,fx=2,fy=2,interpolation=cv2.INTER_CUBIC)
+        rows,_=engine(enlarged,use_det=False,use_cls=False)
+        if not rows or len(rows)!=1:return None
+        readings.append((str(rows[0][0]).strip(),float(rows[0][1])))
+    (key,score),(label,label_score)=readings
+    if re.fullmatch('[A-Z]',key) and score>=.94 and label.upper()=='PRESS' and label_score>=.90:return key
+    return None
