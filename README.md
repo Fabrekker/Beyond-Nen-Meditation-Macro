@@ -27,13 +27,16 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 3. Open **Start Macro.cmd** in that extracted folder. Stay connected to the internet and leave the window open while the launcher installs the Python dependencies automatically.
 4. Choose your training tab and game capture area. **F1** starts/pauses and **F2** pauses by default. Close the macro and run **Update Macro.cmd** for published updates.
 
+**Other manual download, if needed:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vc14/vc_redist.x64.exe). Install it if dependency loading reports a missing DLL. See Microsoft's [official download information](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
+
 ### What gets installed automatically?
 
-These are Python libraries, not separate apps you need to download manually:
+These are Python libraries, not separate apps you need to download manually. The launcher installs the libraries listed in your version's `requirements.txt`:
 
 | Library | Purpose | Official source |
 | --- | --- | --- |
 | MSS | Captures the game area on screen | [MSS documentation](https://python-mss.readthedocs.io/stable/) |
+| Windows Capture (versions that include it) | Captures the Roblox window for the live preview | [Windows Capture](https://pypi.org/project/windows-capture/2.0.0/) |
 | OpenCV | Detects circles, rings, and bars | [OpenCV Python](https://pypi.org/project/opencv-python/) |
 | RapidOCR / ONNX Runtime | Reads key prompts and score text | [RapidOCR 1.4.4](https://pypi.org/project/rapidocr-onnxruntime/1.4.4/), [ONNX Runtime](https://onnxruntime.ai/docs/install/) |
 | Pillow / NumPy | Displays the preview and processes image pixels | [Pillow](https://pypi.org/project/pillow/), [NumPy](https://pypi.org/project/numpy/) |
@@ -47,6 +50,6 @@ These are Python libraries, not separate apps you need to download manually:
 
 **Start without leaving meditation:** open the Roblox menu with **Esc**, press your configured start keybind while the menu is open, then close the menu to return to the minigame. Pressing the key directly during meditation can interrupt it.
 
-**Set Roblox graphics to Manual, quality 1** to reduce visual clutter and improve detection. Keep the mouse unlocked for circle training.
+**Ren/Ten visibility:** meditation aura and other effects can interfere with circle detection. **Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.** Keep the mouse unlocked for circle training.
 
 Settings, captures, and diagnostic logs stay on your computer. Results vary; perfect scores are not guaranteed. En recognition has been replay-tested; live game input is still being validated.
