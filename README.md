@@ -58,7 +58,3 @@ These are Python libraries, not separate apps you need to download manually. The
 **Start without leaving meditation:** open the Roblox menu with **Esc**, press your configured start keybind while the menu is open, then close the menu to return to the minigame. Pressing the key directly during meditation can interrupt it.
 
 **Ren/Ten visibility:** meditation aura and other effects can interfere with circle detection. **Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.** Keep the mouse unlocked and avoid moving it manually during circle training; manual movement cancels the current glide.
-
-Window capture needs Roblox restored rather than minimized. If window capture is unavailable, the app falls back to desktop capture; keep Roblox visible.
-
-Settings, captures, and diagnostic logs stay on your computer. Results vary; perfect scores are not guaranteed. En recognition has been replay-tested; live game input is still being validated.
