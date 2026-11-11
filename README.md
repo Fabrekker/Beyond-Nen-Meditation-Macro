@@ -32,7 +32,10 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 
 ## Getting started
 
-**Automatic setup:** starting the macro automatically installs its required Python libraries. You only need a compatible Python installation first. The information below covers initial setup, general requirements, and manual download links in case they are needed.
+> [!TIP]
+> **Automatic downloads:** starting the macro automatically downloads and installs its required Python libraries. **Python itself must already be installed.**
+
+The information below covers initial setup, general requirements, and manual download links in case they are needed.
 
 1. On **64-bit Windows 10 or 11**, install **[Python 3.12 for Windows (64-bit)](https://www.python.org/downloads/release/python-31210/)**. Keep **pip**, **Tcl/Tk and IDLE**, and the **Python launcher** enabled in the installer. RapidOCR 1.4.4 requires Python below 3.13; use 3.12 for this macro.
 2. Download **nen-macro-1.0.7.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep both launchers beside the `App` folder; do not move individual files.
