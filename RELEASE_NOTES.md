@@ -1,10 +1,10 @@
-## What's new in v1.0.3
+**Download: [nen-macro-1.0.4-update.zip](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.4/nen-macro-1.0.4-update.zip)** — one ZIP for installation and updates.
 
-- Added **Shu** hold/release control and **En** letter prompts, alongside the **Ren/Ten** circle tab.
-- Improved ring-timed click retries, full-screen capture, and automatic result reading with a manual fallback.
-- Added recordable keybinds, hover help, a custom icon, and an in-app menu-first start reminder.
-- Clarified Preview mode, quieted color updates, and improved error messages and input cancellation.
+> **Extract All first**, then run **Start Macro.cmd** from the extracted folder. Keep all extracted files together.
 
-En recognition has been replay-tested; live game input is still being validated.
+## What's new in v1.0.4
 
-Requires Windows and Python 3.12. Created with AI assistance.
+- One ZIP supports fresh installs and updates while preserving settings.
+- Clearer startup checks, Python detection, automatic dependency setup, and private error logging.
+
+Extract the entire ZIP before launching. New users: open **Start Macro.cmd**. Existing users: run **Update Macro.cmd**.

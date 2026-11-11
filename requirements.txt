@@ -1,3 +1,5 @@
 opencv-python==5.0.0.93
 mss==10.2.0
 rapidocr-onnxruntime==1.4.4
+numpy>=2,<3
+Pillow==13.0.0

@@ -24,9 +24,6 @@ def build(release_version,repo=None):
     manifest={'version':release_version,'download_url':f'https://github.com/{repo}/releases/download/v{release_version}/{package.name}' if repo else '',
               'sha256':hashlib.sha256(package.read_bytes()).hexdigest()}
     (dist/'update.json').write_text(json.dumps(manifest,indent=2))
-    with zipfile.ZipFile(dist/f'nen-macro-{release_version}.zip','w',zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(FILES): archive.write(BASE/name,name)
-        archive.writestr('update-settings.json',json.dumps(settings,indent=2))
     print('Release assets:',dist)
     if not repo: print('Hosting not connected: rerun with --repo OWNER/REPOSITORY before sharing or publishing.')
     return dist

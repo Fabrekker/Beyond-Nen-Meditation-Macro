@@ -63,3 +63,16 @@ assert (base/'config.json').read_text()=='personal settings'
 assert updater.apply_pending(base)
 assert updater.current(base)=='1.0.1'
 print('PASS: checked installation, checksum rejection, path traversal rejection, rollback, retry, and personal settings preservation. No network used.')
+
+import bootstrap
+fresh=ROOT/'fresh-install'
+fresh.mkdir(parents=True,exist_ok=True)
+(fresh/'update-settings.json').unlink(missing_ok=True)
+bootstrap.prepare_update_settings(fresh)
+settings=json.loads((fresh/'update-settings.json').read_text())
+assert settings['manifest_url'].startswith('https://github.com/') and settings['automatic'] is True
+personal='{"automatic":false,"manifest_url":"https://example.com/custom.json"}'
+(fresh/'update-settings.json').write_text(personal)
+bootstrap.prepare_update_settings(fresh)
+assert (fresh/'update-settings.json').read_text()==personal
+print('PASS: fresh-install defaults and existing update preferences preserved.')

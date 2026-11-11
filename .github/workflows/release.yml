@@ -49,7 +49,6 @@ jobs:
               --title "Beyond Nen Macro $RELEASE_VERSION" --notes-file RELEASE_NOTES.md
           fi
           gh release upload "$TAG" --clobber \
-            "releases/$RELEASE_VERSION/nen-macro-$RELEASE_VERSION.zip" \
             "releases/$RELEASE_VERSION/nen-macro-$RELEASE_VERSION-update.zip" \
             "releases/$RELEASE_VERSION/update.json"
           gh release edit "$TAG" --draft=false --latest \
