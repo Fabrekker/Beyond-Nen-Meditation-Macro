@@ -7,6 +7,10 @@ import sys
 import struct
 import time
 import traceback
+import ast
+import base64
+import queue
+import threading
 
 BASE=Path(__file__).resolve().parent
 
@@ -57,6 +61,101 @@ def show_startup_error():
         'Check the setup instructions in the README.', 'Beyond Nen - Startup error',0x10)
 
 
+def create_app_shortcuts():
+    """Install managed native launchers without device-specific shortcuts."""
+    import updater
+    updater.ensure_desktop(BASE)
+    clean_desktop_legacy_files()
+
+
+
+def clean_desktop_legacy_files():
+    """Remove only legacy launcher files managed by this desktop installation."""
+    if not (BASE/'desktop-layout.json').exists():return
+    if not all(any((folder/name).is_file() for folder in (BASE,BASE.parent)) for name in ('Start Macro.exe','Update Macro.exe')):return
+    for name in ('Start Macro.cmd','Update Macro.cmd'):
+        target=BASE/name
+        if target.is_file() and target.resolve().parent==BASE.resolve():target.unlink()
+
+
+def graphical_update():
+    """Check and install updates with a small GUI, preserving the app lock."""
+    import tkinter as tk
+    from tkinter import ttk
+    import msvcrt
+    import updater
+    import ctypes
+    try:ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('BeyondNen.TrainingAssistant.Updates')
+    except OSError:pass
+    root=tk.Tk()
+    root.title('Beyond Nen | Updates')
+    root.geometry('500x260');root.resizable(False,False)
+    bg='#101620';card='#1b2534';ink='#edf3fa';muted='#a4b3c8';accent='#63e5bf'
+    root.configure(bg=bg)
+    style=ttk.Style(root);style.theme_use('clam')
+    style.configure('Update.TButton',background='#29364a',foreground=ink,padding=(14,6),borderwidth=0)
+    style.configure('Update.Horizontal.TProgressbar',background=accent,troughcolor=card,borderwidth=0)
+    icon=BASE/'app.ico'
+    if not icon.exists():icon=BASE/'.launcher/macro.ico'
+    if icon.exists():root.iconbitmap(str(icon))
+    panel=tk.Frame(root,bg=bg,padx=24,pady=20);panel.pack(fill='both',expand=True)
+    tk.Label(panel,text='BEYOND NEN',font=('Segoe UI',18,'bold'),fg=ink,bg=bg).pack(anchor='w')
+    tk.Label(panel,text='Application updates',font=('Segoe UI',10),fg=muted,bg=bg).pack(anchor='w',pady=(2,18))
+    status=tk.StringVar(value='Checking for updates...')
+    status_label=tk.Label(panel,textvariable=status,font=('Segoe UI',11),fg=accent,bg=bg,wraplength=450,justify='left');status_label.pack(anchor='w')
+    progress=ttk.Progressbar(panel,mode='indeterminate',style='Update.Horizontal.TProgressbar');progress.pack(fill='x',pady=(14,10));progress.start(12)
+    detail=tk.StringVar(value='Your saved settings stay on this computer.')
+    tk.Label(panel,textvariable=detail,font=('Segoe UI',9),fg=muted,bg=bg,wraplength=450,justify='left').pack(anchor='w')
+    close=ttk.Button(panel,text='Close',command=root.destroy,state='disabled',style='Update.TButton');close.pack(anchor='e',pady=(12,0))
+    events=queue.Queue();busy=[True];timer=[None]
+    def worker():
+        try:
+            with (BASE/'instance.lock').open('a+b') as lock:
+                lock.seek(0,2)
+                if not lock.tell():lock.write(b'0');lock.flush()
+                lock.seek(0)
+                try:msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
+                except OSError:
+                    events.put(('error','Close the macro before checking for updates.','Your current installation has not been changed.'));return
+                updater.apply_pending(BASE);clean_desktop_legacy_files();prepare_update_settings(BASE)
+                release=updater.check(BASE)
+                if release is None:
+                    create_app_shortcuts()
+                    events.put(('done',"You're up to date.",'Installed version: '+updater.current(BASE)));return
+                events.put(('status','Downloading version '+release['version']+'...','The download will be checked before installation.'))
+                updater.stage(release,BASE)
+                events.put(('status','Installing update...','Please keep this window open.'))
+                updater.apply_pending(BASE)
+                clean_desktop_legacy_files()
+                try:create_app_shortcuts()
+                except Exception:record_error('shortcut_creation_failed',traceback.format_exc())
+                events.put(('done','Updated to version '+updater.current(BASE)+'.','Open Start Macro to use the updated application.'))
+        except Exception:
+            record_error('graphical_update_failed',traceback.format_exc())
+            events.put(('error','The update could not be completed.','Details are saved locally in LOGS.jsonl. You can try again later.'))
+    def pump():
+        try:
+            while True:
+                kind,message,description=events.get_nowait()
+                status.set(message);detail.set(description)
+                if kind in ('done','error'):
+                    busy[0]=False;progress.stop();progress.pack_forget();close.state(['!disabled'])
+                    status_label.configure(fg='#ffba8a' if kind=='error' else accent)
+        except queue.Empty:pass
+        timer[0]=root.after(60,pump)
+    def on_close():
+        if not busy[0]:root.destroy()
+        else:detail.set('Please wait for the update check to finish.');root.bell()
+    root.protocol('WM_DELETE_WINDOW',on_close)
+    threading.Thread(target=worker,daemon=True).start();timer[0]=root.after(60,pump)
+    try:root.mainloop()
+    finally:
+        if timer[0]:
+            try:root.after_cancel(timer[0])
+            except tk.TclError:pass
+    return 0
+
+
 def probe_dependencies():
     code="import sys; sys.path.insert(0,sys.argv[1]); import tkinter; import cv2,mss,numpy,onnxruntime,windows_capture; from PIL import Image,ImageTk; from rapidocr_onnxruntime import RapidOCR"
     return subprocess.run([sys.executable,'-I','-c',code,str(BASE/'packages')],capture_output=True,text=True,encoding='utf-8',errors='replace')
@@ -69,6 +168,7 @@ def main():
         return 1
     import msvcrt
     import updater
+    if '--gui-update' in sys.argv:return graphical_update()
     update_only='--update-only' in sys.argv
     quiet='--quiet-launch' in sys.argv
     with (BASE/'instance.lock').open('a+b') as lock:
@@ -81,6 +181,7 @@ def main():
             return 0
         try:
             updater.apply_pending(BASE)
+            clean_desktop_legacy_files()
             prepare_update_settings(BASE)
             settings=json.loads((BASE/'update-settings.json').read_text())
             if update_only and not settings.get('manifest_url'):
@@ -99,7 +200,9 @@ def main():
         except Exception as exc:
             print('Update unavailable; continuing with the installed version:',exc)
             if update_only: return 1
-        if update_only: return 0
+        if update_only:
+            create_app_shortcuts()
+            return 0
         # Tcl/Tk comes from the Python installer, not pip.
         tk_probe=subprocess.run([sys.executable,'-I','-c','import tkinter'],capture_output=True,text=True)
         if tk_probe.returncode:
@@ -129,6 +232,10 @@ def main():
                 record_error('dependency_import_failed',probe.stderr)
                 return 1
             marker.write_text(required)
+        try:create_app_shortcuts()
+        except Exception:
+            record_error('shortcut_creation_failed',traceback.format_exc())
+            if not quiet:print('Could not refresh the desktop launchers; the installed application remains available.')
         msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
     if not quiet:return launch_bootstrap(quiet=True)
     python=Path(sys.executable).with_name('python.exe')
@@ -144,7 +251,7 @@ if __name__=='__main__':
         print('Startup failed. Details are saved in LOGS.jsonl.')
         record_error('bootstrap_failed',details)
         code=1
-    if code and '--quiet-launch' in sys.argv:
+    if code and any(flag in sys.argv for flag in ('--quiet-launch','--gui-update')):
         show_startup_error()
     elif code and '--setup-visible' in sys.argv:
         input('Press Enter to close this setup window...')

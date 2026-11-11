@@ -403,3 +403,49 @@ def recognize_en(engine,images):
     (key,score),(label,label_score)=readings
     if re.fullmatch('[A-Z]',key) and score>=.94 and label.upper()=='PRESS' and label_score>=.90:return key
     return None
+
+
+class KoController:
+    """Hold toward the zone; release once inside, then await the next attempt."""
+    def __init__(self):
+        self.attempts=0
+        self.reset()
+
+    def reset(self):
+        self.previous=None
+        self.velocity=0.
+        self.holding=False
+        self.released=False
+        self.release_position=None
+        self.missing_since=None
+        self.phase='Waiting'
+
+    def update(self,bar,now,active=True):
+        if not active:
+            self.reset();return False
+        if bar is None:
+            if self.missing_since is None:self.missing_since=now
+            if now-self.missing_since>.12:self.reset();self.missing_since=now
+            self.previous=None;self.holding=False;self.phase='Waiting'
+            return False
+        self.missing_since=None
+        if self.released:
+            # Re-arm when a new indicator starts back at the left edge.
+            if (bar.marker<bar.left+(bar.right-bar.left)*.10 and self.release_position is not None
+                    and self.release_position-bar.marker>(bar.right-bar.left)*.12):
+                self.reset()
+            else:
+                self.phase='Released';return False
+        if self.previous:
+            stamp,position=self.previous;dt=now-stamp
+            if .005<dt<.25:self.velocity=.5*self.velocity+.5*(bar.marker-position)/dt
+        self.previous=(now,bar.marker)
+        width=bar.zone_right-bar.zone_left
+        goal=bar.zone_left+width*.45
+        predicted=bar.marker+max(0,self.velocity)*.020
+        if self.holding and bar.marker>=bar.zone_left and (predicted>=goal or bar.marker>=bar.zone_right-width*.20):
+            self.holding=False;self.released=True;self.release_position=bar.marker
+            self.attempts+=1;self.phase='Released'
+            return False
+        self.holding=True;self.phase='Moving'
+        return True

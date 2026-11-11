@@ -19,3 +19,5 @@ icon-generation-prompt.txt
 live_*.py
 check_*.py
 !check_updater.py
+*.lnk
+.launcher/

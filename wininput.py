@@ -390,6 +390,9 @@ class KeyboardInput:
         self.timer=None
         self.suppressed_until={}
         self.error=None
+        self.hold_deadline=0.
+        self.hold_guard=None
+        self.hold_generation=0
 
     def _send(self,vk,up):
         scan=self.api.MapVirtualKeyW(vk,0)
@@ -400,7 +403,7 @@ class KeyboardInput:
 
     def suppresses(self,binding):
         now=time.perf_counter()
-        return any(self.suppressed_until.get(vk,0)>now for vk in binding)
+        return any(vk==self.pressed or self.suppressed_until.get(vk,0)>now for vk in binding)
 
     def tap(self,key,guard):
         with self.lock:
@@ -421,10 +424,45 @@ class KeyboardInput:
             self.timer.start()
             return True
 
+    def set_hold(self,holding,guard=None):
+        """Hold Space for bar training; heartbeat and guards prevent stuck keys."""
+        with self.lock:
+            if not holding or (guard is not None and not guard()):
+                if self.pressed==0x20:self.release()
+                return False
+            if self.error:raise self.error
+            if self.pressed not in (None,0x20):return False
+            self.hold_deadline=time.perf_counter()+.20
+            self.hold_guard=guard
+            if self.pressed is None:
+                self.pressed=0x20
+                self.suppressed_until[0x20]=time.perf_counter()+.25
+                try:self._send(0x20,False)
+                except Exception:
+                    self.release();raise
+                generation=self.hold_generation
+                self.timer=DeadlineTask(.05,self._hold_watchdog,args=(generation,))
+                self.timer.start()
+            return True
+
+    def _hold_watchdog(self,generation):
+        with self.lock:
+            if generation!=self.hold_generation or self.pressed!=0x20:return
+            try:
+                if time.perf_counter()>=self.hold_deadline or (self.hold_guard is not None and not self.hold_guard()):
+                    self.release()
+                else:
+                    self.timer=DeadlineTask(.05,self._hold_watchdog,args=(generation,));self.timer.start()
+            except Exception as exc:self.error=exc
+
     def release(self):
         with self.lock:
+            self.hold_generation+=1
+            self.hold_guard=None
+            self.hold_deadline=0.
             if self.timer:self.timer.cancel();self.timer=None
             if self.pressed is not None:
                 vk=self.pressed
+                self.suppressed_until[vk]=time.perf_counter()+.18
                 self._send(vk,True)
                 self.pressed=None

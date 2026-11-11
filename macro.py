@@ -26,7 +26,7 @@ except ImportError:
         pass
 import numpy as np
 from PIL import Image, ImageTk
-from vision import Detector, Tuner, parse_feedback, feedback_search_rect, detect_shu, ShuController, detect_en_prompt, recognize_en
+from vision import Detector, Tuner, parse_feedback, feedback_search_rect, detect_shu, ShuController, KoController, detect_en_prompt, recognize_en
 from wininput import MouseInput, KeyboardInput
 
 LOG_LOCK=threading.RLock()
@@ -484,6 +484,9 @@ class RobloxWindowCapture:
             except Exception:pass
 
 
+TRAINING_MODES=('Ren/Ten','Shu/Gyo/Zetsu','En/Ken','Ko')
+BAR_MODES=('Shu/Gyo/Zetsu','Ko')
+
 KEY_CODES={**{f'F{i}':0x6f+i for i in range(1,25)},**{c:ord(c) for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'},
            **{f'Numpad{i}':0x60+i for i in range(10)},
            'Space':0x20,'Home':0x24,'End':0x23,'Insert':0x2d,'Delete':0x2e,'Pause':0x13,
@@ -574,8 +577,14 @@ class App:
             self.config.update(cursor_motion_revision=1,lead_ms=12.)
             self.save()
             self.events.put('Smooth cursor travel enabled; previous click timing reset for recalibration.')
-        self.training=self.config.get('training_mode','Ren/Ten')
-        if self.training not in ('Ren/Ten','Shu','En'):self.training='Ren/Ten'
+        saved_training=self.config.get('training_mode','Ren/Ten')
+        self.training={'Shu':'Shu/Gyo/Zetsu','En':'En/Ken'}.get(saved_training,saved_training)
+        if self.training not in TRAINING_MODES:self.training='Ren/Ten'
+        self.control_preferences={}
+        for mode,default in [('Shu/Gyo/Zetsu','Left click'),('Ko','Space')]:
+            value=self.config.get('bar_inputs',{}).get(mode,default)
+            self.control_preferences[mode]=value if value in ('Left click','Space') else default
+        self.control_vars={mode:tk.StringVar(value=value) for mode,value in self.control_preferences.items()}
         try:
             configured=(binding_codes(self.config['start_key']),binding_codes(self.config['pause_key']))
             assert not(set(configured[0])<=set(configured[1]) or set(configured[1])<=set(configured[0]))
@@ -637,17 +646,28 @@ class App:
         tk.Label(outer,text='Training Assistant',font=('Segoe UI',10),fg=muted,bg=bg).pack(anchor='w',pady=(2,10))
         style.configure('TNotebook',background=bg,borderwidth=0)
         style.configure('TNotebook.Tab',font=('Segoe UI',11,'bold'),padding=(20,8),background=card,foreground=ink)
-        style.map('TNotebook.Tab',background=[('selected','#29364a')],foreground=[('selected',accent)])
+        style.map('TNotebook.Tab',background=[('selected','#29364a')],foreground=[('selected',accent)],
+                  padding=[('selected',(20,8)),('!selected',(20,8))],
+                  expand=[('selected',(0,0,0,0)),('!selected',(0,0,0,0))])
         self.tabs=ttk.Notebook(outer)
         self.tabs.pack(fill='x',pady=(0,10))
-        for name,description in (('Ren/Ten','Track shrinking rings and time clicks on the circles.'),('Shu','The macro holds and releases left-click to keep the indicator inside the target zone.'),('En','The macro reads each letter prompt and presses the matching key before the timer runs out.')):
+        for name,description in (('Ren/Ten','To get the mouse to exit movement, simply stop the macro with your keybind.'),('Shu/Gyo/Zetsu','The macro holds and releases the selected input to keep the indicator inside the target zone.'),('En/Ken','The macro reads each letter prompt and presses the matching key before the timer runs out.'),('Ko','The macro holds the selected input and releases it in the gold zone to finish each attempt.')):
             panel=tk.Frame(self.tabs,bg=card)
             tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,padx=12,pady=8).pack(anchor='w')
+            if name in BAR_MODES:
+                row=tk.Frame(panel,bg=card);row.pack(anchor='w',padx=12,pady=(0,4))
+                tk.Label(row,text='Control input',font=('Segoe UI',9),fg=muted,bg=card).pack(side='left',padx=(0,8))
+                choice=ttk.Combobox(row,textvariable=self.control_vars[name],values=('Left click','Space'),state='readonly',width=12)
+                choice.pack(side='left')
+                choice.bind('<<ComboboxSelected>>',lambda event,mode=name:self.set_bar_input(mode))
+                Tooltip(choice,'Choose which input the macro holds. Changing this pauses the macro and releases input.')
             if name=='Ren/Ten':
                 tk.Label(panel,text='Meditation aura and other effects can interfere with circle detection. Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.',
                          font=('Segoe UI',9),bg=card,fg='#e7c779',wraplength=680,justify='left',padx=12,pady=6).pack(anchor='w',fill='x')
+            tk.Label(panel,text='Press Tab in Roblox to clear the top-right area for the best visibility.',
+                     font=('Segoe UI',8),bg=card,fg=muted,padx=12,pady=4).pack(anchor='w')
             self.tabs.add(panel,text=name)
-        self.tabs.select(('Ren/Ten','Shu','En').index(self.training))
+        self.tabs.select(TRAINING_MODES.index(self.training))
         setup=tk.Frame(outer,bg=card,padx=16,pady=14)
         setup.pack(fill='x')
         tk.Label(setup,text='CAPTURE AREAS',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(anchor='w')
@@ -704,7 +724,7 @@ class App:
         live_header.pack(fill='x',pady=(0,8))
         tk.Label(live_header,text='LIVE TRACKING',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(side='left')
         tk.Label(live_header,textvariable=self.scan_info,font=('Segoe UI',9),fg=accent,bg=card).pack(side='right')
-        self.preview=tk.Canvas(live,bg='#0c1119',height=110,highlightthickness=0)
+        self.preview=tk.Canvas(live,bg='#0c1119',height=90,highlightthickness=0)
         self.preview.pack(fill='both',expand=True)
         self.preview.create_text(350,110,text='Your game preview will appear here',fill=muted,font=('Segoe UI',12),tags='placeholder')
         self.preview.bind('<Configure>',lambda e:self.preview.coords('placeholder',e.width/2,e.height/2))
@@ -735,19 +755,20 @@ class App:
         self.tabs.bind('<<NotebookTabChanged>>',self.change_training)
 
     def refresh_training_ui(self):
-        shu=self.training=='Shu'
-        en=self.training=='En'
+        shu=self.training in BAR_MODES
+        en=self.training=='En/Ken'
+        ko=self.training=='Ko'
         self.update_area_label()
-        for label,text in zip(self.stat_titles,('KEYS SENT','LAST RESULT','PROMPT') if en else ('FOCUS','CYCLES','MOUSE CONTROL') if shu else ('TARGETS CLICKED','LAST RESULT','CLICK PATTERN')):
+        for label,text in zip(self.stat_titles,('KEYS SENT','LAST RESULT','PROMPT') if en else ('ROUND','ATTEMPTS','CONTROL') if ko else ('FOCUS','CYCLES','CONTROL') if shu else ('TARGETS CLICKED','LAST RESULT','CLICK PATTERN')):
             label.configure(text=text)
-        for label,text in zip(self.stat_labels,('0','—','Waiting') if en else ('—','0','Released') if shu else (str(self.sent_count),'—','Until resolved')):
+        for label,text in zip(self.stat_labels,('0','—','Waiting') if en else ('Waiting','0','Released') if ko else ('—','0','Released') if shu else (str(self.sent_count),'—','Until resolved')):
             label.configure(text=text)
         self.legend_label.configure(text='Cyan: verified prompt area; unclear letters are skipped' if en else 'Gold: target zone   •   Cyan: indicator' if shu else 'Green: target    •    Magenta: shrinking ring')
         self.feedback_select_button.state(['disabled'] if shu else ['!disabled'])
         self.auto_feedback_check.state(['disabled'] if shu else ['!disabled'])
-        if shu:self.feedback_info.set('Shu reads its focus bar directly')
+        if shu:self.feedback_info.set('Ko releases in the gold zone' if ko else 'Focus is read directly from the bar')
         else:self.feedback_info.set('Automatic feedback: waiting for a result' if self.config.get('auto_feedback',True) else 'Manual feedback selected')
-        self.color_info.set('Waiting for En prompt' if en else 'Waiting for Shu bar' if shu else 'Checking colors…')
+        self.color_info.set('Waiting for En prompt' if en else 'Waiting for bar' if shu else 'Checking colors…')
 
     def change_training(self,event=None):
         selected=self.tabs.tab(self.tabs.select(),'text')
@@ -759,6 +780,16 @@ class App:
         self.refresh_training_ui()
         self.status.set(f'{selected} selected. Input PAUSED; press your start key in Roblox to begin.')
         self.events.put(f'Training selected: {selected}; input released.')
+
+    def set_bar_input(self,mode):
+        self.pause()
+        value=self.control_vars[mode].get()
+        if value not in ('Left click','Space'):return
+        self.control_preferences[mode]=value
+        self.config['bar_inputs']=dict(self.control_preferences)
+        self.save();self.refresh_training_ui()
+        self.status.set(f'{mode} uses {value}. Input PAUSED; press your start key in Roblox to begin.')
+        self.events.put(f'{mode} control input: {value}; input released.')
 
     def update_key_hint(self):
         self.key_hint.set(f"{self.config['start_key']}  Start / pause     {self.config['pause_key']}  Pause")
@@ -820,8 +851,8 @@ class App:
         parts=[]
         for key in ('game','feedback'):
             region=self.config.get(key)
-            if key=='feedback' and self.training=='Shu':
-                parts.append('Feedback: Shu focus meter')
+            if key=='feedback' and self.training in BAR_MODES:
+                parts.append('Feedback: target zone' if self.training=='Ko' else 'Feedback: focus meter')
             elif key=='feedback' and self.config.get('auto_feedback',True):
                 parts.append('Feedback: automatic'+(' (manual saved)' if region else ''))
             else:
@@ -957,6 +988,8 @@ class App:
         en_last_feedback_job=0.
         en_missing_reported=False
         shu=ShuController()
+        ko=KoController()
+        last_ko_attempts=0
         last_shu_session=-1
         shu_visible=False
         shu_last_seen=time.perf_counter()
@@ -1036,7 +1069,7 @@ class App:
                     last_stamp=processed_at
                     detection_scale=min(1.,960/frame.shape[1])
                     detection_frame=cv2.resize(frame,None,fx=detection_scale,fy=detection_scale,interpolation=cv2.INTER_AREA) if detection_scale<1 else frame
-                    if self.training=='En':
+                    if self.training=='En/Ken':
                         now=time.perf_counter()
                         if en_session!=session:
                             en_token+=1;en_signature=None;en_sent=False;en_key=None;en_unknown=False
@@ -1069,7 +1102,7 @@ class App:
                             en_key=key
                             def key_allowed(sid=session):
                                 return (self.running.is_set() and self.session==sid and not self.closed.is_set()
-                                        and self.training=='En' and foreground_is_roblox()
+                                        and self.training=='En/Ken' and foreground_is_roblox()
                                         and not any(binding_down(b) for b in self.hotkeys if not self.keyboard.suppresses(b))
                                         and not any(ctypes.windll.user32.GetAsyncKeyState(v)&0x8000 for v in (0x10,0x11,0x12,0x5B,0x5C)))
                             if not self.running.is_set():
@@ -1105,37 +1138,50 @@ class App:
                             last_preview=now
                         self.closed.wait(.005 if self.running.is_set() else .045)
                         continue
-                    if self.training=='Shu':
+                    if self.training in BAR_MODES:
                         if last_shu_session!=session:
                             shu.previous=None
                             shu.velocity=0.
                             shu.holding=False
+                            ko.reset()
                             last_shu_session=session
                             shu_last_seen=time.perf_counter()
                             shu_missing_reported=False
                         bar=detect_shu(detection_frame)
                         now=time.perf_counter()
-                        holding=shu.update(bar,now)
-                        def hold_allowed(sid=session):
-                            return (self.running.is_set() and not self.closed.is_set() and self.session==sid
-                                    and self.training=='Shu' and foreground_is_roblox()
-                                    and not any(binding_down(binding) for binding in self.hotkeys))
+                        control=self.control_preferences[self.training]
                         active=self.running.is_set()
-                        self.mouse.set_hold(bool(bar and holding and active),guard=hold_allowed)
+                        is_ko=self.training=='Ko'
+                        holding=ko.update(bar,now,active) if is_ko else shu.update(bar,now)
+                        def hold_allowed(sid=session,mode=self.training,selected=control):
+                            return (self.running.is_set() and not self.closed.is_set() and self.session==sid
+                                    and self.training==mode and foreground_is_roblox()
+                                    and not any(binding_down(binding) for binding in self.hotkeys)
+                                    and (selected!='Space' or not any(USER.GetAsyncKeyState(v)&0x8000 for v in (0x10,0x11,0x12,0x5b,0x5c))))
+                        pressed=bool(bar and holding and active)
+                        if control=='Space':
+                            self.mouse.set_hold(False)
+                            self.keyboard.set_hold(pressed,guard=hold_allowed)
+                        else:
+                            self.keyboard.set_hold(False)
+                            self.mouse.set_hold(pressed,guard=hold_allowed)
                         if bar:
                             shu_last_seen=now
                             shu_missing_reported=False
                             if not shu_visible:
-                                self.events.put('Shu bar detected: white indicator and gold zone tracked.')
+                                self.events.put(f'{self.training} bar detected: white indicator and gold zone tracked.')
                             shu_visible=True
                         else:
-                            if shu_visible:self.events.put('Shu bar disappeared; mouse released. Waiting for the next round.')
+                            if shu_visible:self.events.put(f'{self.training} bar disappeared; input released. Waiting for the next round.')
                             shu_visible=False
                             if self.running.is_set() and now-shu_last_seen>6 and not shu_missing_reported:
-                                self.events.put('No Shu bar detected. Check the capture area and keep the minigame visible; mouse is released.')
+                                self.events.put(f'No {self.training} bar detected. Check the capture area and keep the minigame visible; input is released.')
                                 shu_missing_reported=True
-                        if shu.cycles!=shu_cycles:
-                            self.events.put('Shu focus reached full and reset; continuing the next cycle.')
+                        if is_ko and ko.attempts!=last_ko_attempts:
+                            self.events.put('Ko input released in the target zone; waiting for the next attempt.')
+                            last_ko_attempts=ko.attempts
+                        if not is_ko and shu.cycles!=shu_cycles:
+                            self.events.put(f'{self.training} focus reached full and reset; continuing the next cycle.')
                             shu_cycles=shu.cycles
                         if now-last_preview>.05:
                             if bar:
@@ -1145,8 +1191,9 @@ class App:
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(40,200,245),2)
                                 cv2.line(frame,(marker,y0-3),(marker,y1+3),(255,240,40),2)
                             self.latest(self.frames,frame)
-                            action='Paused' if not self.running.is_set() else 'Holding' if self.mouse.pressed else 'Released'
-                            self.metrics.put(('shu',{'focus':bar.focus if bar else None,'cycles':shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
+                            held=self.keyboard.pressed==0x20 if control=='Space' else self.mouse.pressed
+                            action='Paused' if not active else ('Space held' if control=='Space' else 'Left held') if held else 'Released'
+                            self.metrics.put(('shu',{'mode':self.training,'phase':ko.phase if is_ko else None,'focus':bar.focus if bar else None,'cycles':ko.attempts if is_ko else shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
                             last_preview=now
                         self.closed.wait(.003 if self.running.is_set() else .045)
                         continue
@@ -1324,10 +1371,13 @@ class App:
         if not self.config.get('game'):
             self.status.set('Select game or Use full screen first.')
             return
+        if self.training in BAR_MODES and self.control_preferences[self.training]=='Space' and any(0x20 in binding for binding in self.hotkeys):
+            self.status.set('Space is used for bar control. Choose start/pause keybinds without Space, or select Left click.')
+            return
         if self.training=='Ren/Ten' and not self.config.get('auto_feedback',True) and not self.config.get('feedback'):
             self.status.set('Select feedback manually or enable Automatic feedback.')
             return
-        if (self.training=='Ren/Ten' and not self.ocr_ready) or (self.training=='En' and not self.en_ready):
+        if (self.training=='Ren/Ten' and not self.ocr_ready) or (self.training=='En/Ken' and not self.en_ready):
             self.status.set('Wait for feedback OCR to load before enabling clicks.')
             return
         if not foreground_is_roblox():
@@ -1336,7 +1386,7 @@ class App:
         self.session+=1
         self.running.set()
         self.mouse.set_enabled(True)
-        self.events.put(f'Started {self.training}: '+('LETTER KEY CONTROL' if self.training=='En' else 'HOLD / RELEASE CONTROL' if self.training=='Shu' else 'LIVE CLICKS — target-aware click retries'))
+        self.events.put(f'Started {self.training}: '+('LETTER KEY CONTROL' if self.training=='En/Ken' else 'HOLD / RELEASE CONTROL' if self.training in BAR_MODES else 'LIVE CLICKS — target-aware click retries'))
         with (BASE/'LOGS.jsonl').open('a') as log:
             log.write(json.dumps({'time':time.time(),'event':'started','training':self.training})+'\n')
         # Keep the panel out of the captured playfield while input is active.
@@ -1376,7 +1426,7 @@ class App:
             if kind=='capture_status':
                 self.capture_info.set(value)
             elif kind=='en':
-                if self.training!='En':continue
+                if self.training!='En/Ken':continue
                 self.stat_labels[0].configure(text=str(value['count']))
                 result=value['result']
                 self.stat_labels[1].configure(text='—' if result is None else result if result=='MISS' else f'{result:+.2f}')
@@ -1384,14 +1434,15 @@ class App:
                 self.scan_info.set(f"En {'reading' if value['tracked'] else 'searching'}  •  {value['fps']:.0f} fps")
                 self.color_info.set('Prompt tracked' if value['tracked'] else 'Waiting for En prompt')
             elif kind=='shu':
-                if self.training!='Shu':continue
-                self.stat_labels[0].configure(text='—' if value['focus'] is None else f"{value['focus']*100:.0f}%")
+                if self.training not in BAR_MODES:continue
+                if value.get('mode',self.training)!=self.training:continue
+                self.stat_labels[0].configure(text=value.get('phase','Waiting') if self.training=='Ko' else '—' if value['focus'] is None else f"{value['focus']*100:.0f}%")
                 self.stat_labels[1].configure(text=str(value['cycles']))
                 self.stat_labels[2].configure(text=value['action'])
-                self.scan_info.set(f"Shu {'tracking' if value['tracked'] else 'searching'}  •  {value['fps']:.0f} fps")
-                self.color_info.set('Indicator tracked' if value['tracked'] else 'Waiting for Shu bar')
+                self.scan_info.set(f"{self.training} {'tracking' if value['tracked'] else 'searching'}  •  {value['fps']:.0f} fps")
+                self.color_info.set('Indicator tracked' if value['tracked'] else 'Waiting for bar')
                 self.color_label.configure(fg='#63e5bf' if value['tracked'] else '#98a7bc')
-            elif self.training in ('Shu','En'):
+            elif self.training!='Ren/Ten':
                 continue
             elif kind=='feedback_status':
                 self.feedback_info.set(value)

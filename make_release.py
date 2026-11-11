@@ -5,9 +5,18 @@ import json
 from pathlib import Path
 import re
 import zipfile
-from updater import FILES,version
+import tempfile
+from updater import FILES,DESKTOP_FILES,version
+from build_desktop import build as build_desktop
 
 BASE=Path(__file__).resolve().parent
+
+def add_file(archive,path,name):
+    # Fixed metadata avoids publishing the source machine's file timestamps.
+    entry=zipfile.ZipInfo(name,date_time=(2020,1,1,0,0,0))
+    entry.compress_type=zipfile.ZIP_DEFLATED
+    entry.external_attr=0o100644<<16
+    archive.writestr(entry,path.read_bytes())
 
 def build(release_version,repo=None):
     version(release_version)
@@ -18,11 +27,19 @@ def build(release_version,repo=None):
     if repo: (BASE/'update-settings.json').write_text(json.dumps(settings,indent=2))
     dist=BASE/'releases'/release_version
     dist.mkdir(parents=True,exist_ok=True)
-    package=dist/f'nen-macro-{release_version}-update.zip'
+    package=dist/f'app-files-{release_version}.pkg'
     with zipfile.ZipFile(package,'w',zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(FILES): archive.write(BASE/name,name)
+        for name in sorted(FILES): add_file(archive,BASE/name,name)
     manifest={'version':release_version,'download_url':f'https://github.com/{repo}/releases/download/v{release_version}/{package.name}' if repo else '',
               'sha256':hashlib.sha256(package.read_bytes()).hexdigest()}
+    desktop=dist/f'nen-macro-{release_version}.zip'
+    with tempfile.TemporaryDirectory(prefix='build-',dir=dist) as temporary:
+        folder=build_desktop(Path(temporary)/'desktop')
+        actual={p.relative_to(folder).as_posix() for p in folder.rglob('*') if p.is_file()}
+        if actual!=DESKTOP_FILES:raise ValueError('Desktop build contains unexpected files')
+        with zipfile.ZipFile(desktop,'w',zipfile.ZIP_DEFLATED) as archive:
+            for name in sorted(DESKTOP_FILES):add_file(archive,folder/name,name)
+    manifest.update(desktop_download_url=f'https://github.com/{repo}/releases/download/v{release_version}/{desktop.name}' if repo else '',desktop_sha256=hashlib.sha256(desktop.read_bytes()).hexdigest())
     (dist/'update.json').write_text(json.dumps(manifest,indent=2))
     print('Release assets:',dist)
     if not repo: print('Hosting not connected: rerun with --repo OWNER/REPOSITORY before sharing or publishing.')
