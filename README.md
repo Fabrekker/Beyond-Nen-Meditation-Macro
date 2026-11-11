@@ -20,7 +20,28 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 
 ## Getting started
 
-Requires **Windows and Python 3.12**. Open **Start Macro.cmd**, choose your training tab, and select the game area or **Use full screen**. Defaults: **F1** starts/pauses; **F2** pauses. Close the macro and run **Update Macro.cmd** to install published updates.
+1. Install **[Python 3.12 for Windows (64-bit)](https://www.python.org/downloads/release/python-31210/)**. Keep **pip**, **Tcl/Tk and IDLE**, and the **Python launcher** enabled in the installer. RapidOCR 1.4.4 requires Python below 3.13; use 3.12 for this macro.
+2. Download **nen-macro-1.0.3.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep `Start Macro.cmd`, `bootstrap.py`, and the other extracted files together.
+3. Open **Start Macro.cmd** in that extracted folder. Stay connected to the internet and leave the window open while the launcher installs the Python dependencies automatically.
+4. Choose your training tab and game capture area. **F1** starts/pauses and **F2** pauses by default. Close the macro and run **Update Macro.cmd** for published updates.
+
+### What gets installed automatically?
+
+These are Python libraries, not separate apps you need to download manually:
+
+| Library | Purpose | Official source |
+| --- | --- | --- |
+| MSS | Captures the game area on screen | [MSS documentation](https://python-mss.readthedocs.io/stable/) |
+| OpenCV | Detects circles, rings, and bars | [OpenCV Python](https://pypi.org/project/opencv-python/) |
+| RapidOCR / ONNX Runtime | Reads key prompts and score text | [RapidOCR 1.4.4](https://pypi.org/project/rapidocr-onnxruntime/1.4.4/), [ONNX Runtime](https://onnxruntime.ai/docs/install/) |
+| Pillow / NumPy | Displays the preview and processes image pixels | [Pillow](https://pypi.org/project/pillow/), [NumPy](https://pypi.org/project/numpy/) |
+
+### If it does not open
+
+- **Cannot open `bootstrap.py` / No such file or directory:** extract the entire release ZIP first and launch from the extracted folder.
+- **Python not found / requested Python version not installed:** install Python **3.12, 64-bit**, with the Python launcher enabled.
+- **DLL load failed:** install Microsoft's [Visual C++ x64 runtime](https://aka.ms/vc14/vc_redist.x64.exe), required by Windows ONNX Runtime builds ([installation guide](https://onnxruntime.ai/docs/install/)).
+- **pip or dependency installation failed:** keep the terminal open and read the last error before pressing a key. Libraries install automatically; downloading their source ZIPs is unnecessary.
 
 **Start without leaving meditation:** open the Roblox menu with **Esc**, press your configured start keybind while the menu is open, then close the menu to return to the minigame. Pressing the key directly during meditation can interrupt it.
 
