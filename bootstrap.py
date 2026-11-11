@@ -27,17 +27,34 @@ def record_error(event,details):
         pass
 
 
-def run_logged(command,event):
+def run_logged(command,event,hidden=False):
     lines=[]
     with subprocess.Popen(command,cwd=BASE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                          text=True,encoding='utf-8',errors='replace') as process:
+                          text=True,encoding='utf-8',errors='replace',
+                          creationflags=subprocess.CREATE_NO_WINDOW if hidden and sys.platform=='win32' else 0) as process:
         for line in process.stdout:
-            print(line,end='',flush=True)
+            if sys.stdout is not None:print(line,end='',flush=True)
             lines.append(line)
             lines=lines[-80:]
         code=process.wait()
     if code:record_error(event,''.join(lines) or f'Process exited with code {code}')
     return code
+
+
+def launch_bootstrap(quiet):
+    python=Path(sys.executable).with_name('pythonw.exe' if quiet else 'python.exe')
+    if not python.exists():python=Path(sys.executable)
+    flag='--quiet-launch' if quiet else '--setup-visible'
+    creation=subprocess.CREATE_NO_WINDOW if quiet else subprocess.CREATE_NEW_CONSOLE
+    subprocess.Popen([str(python),str(BASE/'bootstrap.py'),flag],cwd=BASE,creationflags=creation)
+    return 0
+
+
+def show_startup_error():
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(None,
+        'The macro could not start. Details were saved in LOGS.jsonl in the macro folder. '
+        'Check the setup instructions in the README.', 'Beyond Nen - Startup error',0x10)
 
 
 def probe_dependencies():
@@ -53,6 +70,7 @@ def main():
     import msvcrt
     import updater
     update_only='--update-only' in sys.argv
+    quiet='--quiet-launch' in sys.argv
     with (BASE/'instance.lock').open('a+b') as lock:
         lock.seek(0,2)
         if not lock.tell(): lock.write(b'0'); lock.flush()
@@ -71,6 +89,7 @@ def main():
             if update_only or settings.get('automatic',True):
                 release=updater.check(BASE)
                 if release:
+                    if quiet:return launch_bootstrap(quiet=False)
                     print('Installing update '+release['version'])
                     updater.stage(release,BASE)
                     updater.apply_pending(BASE)
@@ -91,6 +110,7 @@ def main():
         marker=BASE/'.dependencies.sha256'
         probe=probe_dependencies()
         if not marker.exists() or marker.read_text()!=required or probe.returncode:
+            if quiet:return launch_bootstrap(quiet=False)
             print('Installing macro dependencies automatically. Keep this window open; the first setup may take a few minutes.')
             pip_ok=subprocess.run([sys.executable,'-m','pip','--version'],capture_output=True).returncode==0
             if not pip_ok and run_logged([sys.executable,'-m','ensurepip','--upgrade'],'pip_setup_failed'):
@@ -110,7 +130,10 @@ def main():
                 return 1
             marker.write_text(required)
         msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
-    return run_logged([sys.executable,str(BASE/'macro.py')],'app_startup_failed')
+    if not quiet:return launch_bootstrap(quiet=True)
+    python=Path(sys.executable).with_name('python.exe')
+    if not python.exists():python=Path(sys.executable)
+    return run_logged([str(python),str(BASE/'macro.py')],'app_startup_failed',hidden=True)
 
 if __name__=='__main__':
     try:
@@ -121,4 +144,8 @@ if __name__=='__main__':
         print('Startup failed. Details are saved in LOGS.jsonl.')
         record_error('bootstrap_failed',details)
         code=1
+    if code and '--quiet-launch' in sys.argv:
+        show_startup_error()
+    elif code and '--setup-visible' in sys.argv:
+        input('Press Enter to close this setup window...')
     raise SystemExit(code)

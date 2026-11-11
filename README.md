@@ -4,14 +4,12 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 
 > **IMPORTANT — Extract All before launching:** right-click the downloaded ZIP, choose **Extract All**, then run **Start Macro.cmd** inside the extracted folder. Keep all files together. Running the launcher inside the ZIP causes the missing `bootstrap.py` error.
 
-**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.5/nen-macro-1.0.5-update.zip)** — the same download works for new installs and updates.
+**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.6/nen-macro-1.0.6-update.zip)** — the same download works for new installs and updates.
 
-## What's new — v1.0.5
+## What's new — v1.0.6
 
-- Added smooth cursor travel to Ren/Ten circles with steadier target tracking and ring-timed clicks.
-- Reduced capture-related cursor flicker and added live Roblox window capture while the macro panel is in front.
-- Removed Preview mode; live tracking continues while paused, with simpler Running/Paused controls.
-- Added Ren/Ten guidance for aura effects: aim the camera at a clearer area and use graphics quality 1.
+- Clarified the Shu and En tab descriptions to explain what the macro controls automatically.
+- Quieter launches: the GUI opens without a console staying alongside it. Setup/update progress appears only when needed, and startup failures remain visible and logged locally.
 
 ## Features
 
@@ -25,8 +23,8 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 ## Getting started
 
 1. On **64-bit Windows 10 or 11**, install **[Python 3.12 for Windows (64-bit)](https://www.python.org/downloads/release/python-31210/)**. Keep **pip**, **Tcl/Tk and IDLE**, and the **Python launcher** enabled in the installer. RapidOCR 1.4.4 requires Python below 3.13; use 3.12 for this macro.
-2. Download **nen-macro-1.0.5-update.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep `Start Macro.cmd`, `bootstrap.py`, and the other extracted files together.
-3. Open **Start Macro.cmd** in that extracted folder. Stay connected to the internet and leave the window open while the launcher installs the Python dependencies automatically.
+2. Download **nen-macro-1.0.6-update.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep `Start Macro.cmd`, `bootstrap.py`, and the other extracted files together.
+3. Open **Start Macro.cmd** in that extracted folder. Normal launches open the GUI without a console staying alongside it. If setup is needed, leave its progress window open until it finishes; Python dependencies install automatically.
 4. Choose your training tab and game capture area. **F1** starts/pauses and **F2** pauses by default. Close the macro and run **Update Macro.cmd** for published updates.
 
 **Other manual download, if needed:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vc14/vc_redist.x64.exe). Install it if dependency loading reports a missing DLL. See Microsoft's [official download information](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).

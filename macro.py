@@ -640,7 +640,7 @@ class App:
         style.map('TNotebook.Tab',background=[('selected','#29364a')],foreground=[('selected',accent)])
         self.tabs=ttk.Notebook(outer)
         self.tabs.pack(fill='x',pady=(0,10))
-        for name,description in (('Ren/Ten','Track shrinking rings and time clicks on the circles.'),('Shu','Hold to move right; release to move left. Keep the indicator inside the gold zone.'),('En','Read the letter above PRESS and tap it as soon as its timer appears.')):
+        for name,description in (('Ren/Ten','Track shrinking rings and time clicks on the circles.'),('Shu','The macro holds and releases left-click to keep the indicator inside the target zone.'),('En','The macro reads each letter prompt and presses the matching key before the timer runs out.')):
             panel=tk.Frame(self.tabs,bg=card)
             tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,padx=12,pady=8).pack(anchor='w')
             if name=='Ren/Ten':

@@ -8,21 +8,29 @@ set /p "MACRO_PY=" < local-python.txt
 if not exist "%MACRO_PY%" goto try_launcher
 "%MACRO_PY%" -c "import sys,struct;sys.exit(not(sys.version_info[:2]==(3,12) and struct.calcsize('P')==8))" >nul 2>nul
 if errorlevel 1 goto try_launcher
-"%MACRO_PY%" bootstrap.py %*
-goto done
+goto launch
 :try_launcher
 where py >nul 2>nul
 if errorlevel 1 goto try_python
 py -3.12 -c "import sys,struct;sys.exit(not(sys.version_info[:2]==(3,12) and struct.calcsize('P')==8))" >nul 2>nul
 if errorlevel 1 goto try_python
-py -3.12 bootstrap.py %*
-goto done
+for /f "delims=" %%P in ('py -3.12 -c "import sys; print(sys.executable)"') do set "MACRO_PY=%%P"
+goto launch
 :try_python
 where python >nul 2>nul
 if errorlevel 1 goto missing_python
 python -c "import sys,struct;sys.exit(not(sys.version_info[:2]==(3,12) and struct.calcsize('P')==8))" >nul 2>nul
 if errorlevel 1 goto missing_python
-python bootstrap.py %*
+for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)"') do set "MACRO_PY=%%P"
+:launch
+if not defined MACRO_PY goto missing_python
+if /i "%~1"=="--update-only" goto launch_visible
+for %%P in ("%MACRO_PY%") do set "MACRO_PYW=%%~dpPpythonw.exe"
+if not exist "%MACRO_PYW%" goto launch_visible
+start "" "%MACRO_PYW%" "%~dp0bootstrap.py" --quiet-launch
+exit /b 0
+:launch_visible
+"%MACRO_PY%" bootstrap.py %*
 goto done
 :missing_python
 echo Python 3.12 ^(64-bit^) was not found. Installing another Python version alone is not enough.
