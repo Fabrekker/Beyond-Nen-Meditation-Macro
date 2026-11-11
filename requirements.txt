@@ -3,3 +3,4 @@ mss==10.2.0
 rapidocr-onnxruntime==1.4.4
 numpy>=2,<3
 Pillow==13.0.0
+windows-capture==2.0.0; sys_platform == "win32"

@@ -1,5 +1,6 @@
 """Documented Windows input with checked delivery and a bounded button hold."""
 import ctypes
+import math
 from ctypes import wintypes
 import threading
 import time
@@ -60,6 +61,12 @@ class MouseInput:
         self.lock=threading.RLock()
         self.pressed=False
         self.timer=None
+        self.motion_timer=None
+        self.motion=None
+        self.motion_expected=None
+        self.arrived_at=None
+        self.movement_steps=0
+        self.motion_started=None
         self.error=None
         self.generation=0
         self.retry_gap_ms=20.
@@ -76,80 +83,144 @@ class MouseInput:
             self.api.GetCursorPos.restype=wintypes.BOOL
 
     def schedule_click(self,x,y,when,count=None,guard=None,on_sent=None,tolerance=12):
-        """Prepare the pointer, then dispatch independently of frame capture."""
+        """Glide immediately, settle on the circle, and keep the ring deadline."""
         with self.lock:
-            if self.error:
-                raise self.error
-            if not self.enabled or (guard is not None and not guard()):
-                return False
+            if self.error:raise self.error
+            if not self.enabled or (guard is not None and not guard()):return False
             self.release()
-            generation=self.generation
             if count is None and guard is None:
                 raise ValueError('Continuous retries require a target/focus guard')
+            self._position(x,y)  # Validate desktop bounds without moving.
+            point=wintypes.POINT()
+            if not self.api.GetCursorPos(ctypes.byref(point)):
+                raise OSError('Could not read the cursor before smooth movement')
+            now=time.perf_counter()
+            distance=math.hypot(x-point.x,y-point.y)
+            available=when-now-.014
+            if distance>2 and available<.035:
+                self.last_cancellation=(now,'Target skipped: not enough ring time for smooth movement and settling.')
+                return False
             count=None if count is None else max(1,int(count))
             self.retry_target=(x,y,tolerance)
             self.scheduled=(x,y,when,count,guard,on_sent,tolerance)
-            self._schedule(max(0,when-time.perf_counter()-.025),self._prepare,
-                           x,y,when,count,guard,on_sent,tolerance,generation)
+            self.motion_started=now
+            self.movement_steps=0
+            if distance<=2:
+                self.arrived_at=now;self.prepared=True
+            else:
+                duration=min(.550,max(.320,distance/2600+.120),available)
+                self.motion=(point.x,point.y,now,duration)
+                self.motion_expected=(point.x,point.y)
+                self._schedule_motion(.008,self.generation)
+            self._schedule(max(0,when-now),self._dispatch,self.generation)
             return True
 
     def retime(self,when):
-        """Refine a reserved click until pointer preparation starts."""
+        """Update the click deadline while movement continues independently."""
         with self.lock:
-            if not self.enabled or self.prepared or self.scheduled is None:
-                return False
+            if not self.enabled or self.scheduled is None:return False
             x,y,old,count,guard,on_sent,tolerance=self.scheduled
             now=time.perf_counter()
-            if old-now<.035 or when-now<.035 or not .002<abs(when-old)<.060:
-                return False
-            if self.timer: self.timer.cancel()
-            self.generation+=1
-            generation=self.generation
+            if old-now<.035 or when-now<.035 or not .002<abs(when-old)<.060:return False
+            if self.motion and when<self.motion[2]+self.motion[3]+.014:return False
+            if self.timer:self.timer.cancel()
             self.scheduled=(x,y,when,count,guard,on_sent,tolerance)
-            self._schedule(max(0,when-now-.025),self._prepare,x,y,when,count,guard,on_sent,tolerance,generation)
+            self._schedule(max(0,when-now),self._dispatch,self.generation)
             return True
 
-    def _prepare(self,x,y,when,count,guard,on_sent,tolerance,generation):
+    def update_target(self,x,y):
+        """Follow the same tracked circle; never switch to an unrelated target."""
         with self.lock:
-            if generation!=self.generation or not self.enabled:
-                return
-            if guard is not None and not guard():
-                self.last_cancellation=(time.perf_counter(),'Scheduled click cancelled: target, focus, or stop state changed before cursor preparation.')
-                self.release()
-                return
-            try:
-                self.prepared=True
-                if not self.move(x,y):
-                    return
-                self._schedule(max(0,when-time.perf_counter()),self._dispatch,
-                               x,y,when,count,guard,on_sent,tolerance,generation)
-            except Exception as exc:
-                self.error=exc
-
-    def _dispatch(self,x,y,when,count,guard,on_sent,tolerance,generation):
-        with self.lock:
-            if generation!=self.generation or not self.enabled:
-                return
-            try:
-                if guard is not None and not guard():
-                    self.last_cancellation=(time.perf_counter(),'Scheduled click cancelled: target, focus, or stop state changed before button press.')
-                    self.release()
-                    return
+            if self.scheduled is None or not self.enabled:return False
+            oldx,oldy,when,count,guard,on_sent,tolerance=self.scheduled
+            self._position(x,y)
+            if math.hypot(x-oldx,y-oldy)<=max(4,tolerance*.5):return True
+            self.scheduled=(x,y,when,count,guard,on_sent,tolerance)
+            self.retry_target=(x,y,tolerance)
+            if self.motion is None and math.hypot(x-oldx,y-oldy)>3:
                 point=wintypes.POINT()
-                if not self.api.GetCursorPos(ctypes.byref(point)):
-                    raise OSError('Could not verify the cursor position')
+                if not self.api.GetCursorPos(ctypes.byref(point)):raise OSError('Could not read tracked cursor position')
+                available=when-time.perf_counter()-.014
+                if available<.035:
+                    self.last_cancellation=(time.perf_counter(),'Target moved too late to follow smoothly; click cancelled.')
+                    self.release();return False
+                self.prepared=False;self.arrived_at=None
+                self.motion=(point.x,point.y,time.perf_counter(),min(.070,available))
+                self.motion_expected=(point.x,point.y)
+                self._schedule_motion(.008,self.generation)
+            return True
+
+    def _schedule_motion(self,delay,generation):
+        self.motion_timer=DeadlineTask(delay,self._motion_tick,args=(generation,))
+        self.motion_timer.start()
+
+    def _motion_tick(self,generation):
+        with self.lock:
+            if generation!=self.generation or not self.enabled or self.scheduled is None or self.motion is None:return
+            try:
+                x,y,when,count,guard,on_sent,tolerance=self.scheduled
+                if guard is not None and not guard():
+                    self.last_cancellation=(time.perf_counter(),'Smooth movement stopped: target, focus, or stop state changed.')
+                    self.release();return
+                point=wintypes.POINT()
+                if not self.api.GetCursorPos(ctypes.byref(point)):raise OSError('Could not verify cursor during smooth movement')
+                if self.motion_expected and math.hypot(point.x-self.motion_expected[0],point.y-self.motion_expected[1])>max(20,tolerance*2):
+                    self.last_cancellation=(time.perf_counter(),'Smooth movement stopped: cursor was moved or constrained. Keep the mouse unlocked.')
+                    self.release();return
+                now=time.perf_counter()
+                if now>when-.008:
+                    self.last_cancellation=(now,'Click cancelled: smooth movement did not settle before the ring deadline.')
+                    self.release();return
+                sx,sy,began,duration=self.motion
+                progress=min(1.,max(0.,(now-began)/max(.001,duration)))
+                eased=progress*progress*(3-2*progress)
+                nx,ny=sx+(x-sx)*eased,sy+(y-sy)*eased
+                # Bound individual steps even when the OS delays a callback.
+                dx,dy=nx-point.x,ny-point.y
+                length=math.hypot(dx,dy)
+                if length>48:nx=point.x+dx*48/length;ny=point.y+dy*48/length
+                nx,ny=round(nx),round(ny)
+                if (nx,ny)!=(point.x,point.y):
+                    if not self.move(nx,ny):return
+                    self.movement_steps+=1
+                self.motion_expected=(nx,ny)
+                if math.hypot(nx-x,ny-y)<=1:
+                    self.motion=None;self.motion_timer=None
+                    self.prepared=True;self.arrived_at=time.perf_counter()
+                else:self._schedule_motion(.008,generation)
+            except Exception as exc:
+                self.error=exc;self.release()
+
+    def _dispatch(self,generation):
+        with self.lock:
+            if generation!=self.generation or not self.enabled or self.scheduled is None:return
+            try:
+                x,y,when,count,guard,on_sent,tolerance=self.scheduled
+                now=time.perf_counter()
+                if now<when-.001:
+                    self._schedule(when-now,self._dispatch,generation);return
+                if guard is not None and not guard():
+                    self.last_cancellation=(now,'Scheduled click cancelled: target, focus, or stop state changed before button press.')
+                    self.release();return
+                if self.arrived_at is None or now-self.arrived_at<.008:
+                    self.last_cancellation=(now,'Click cancelled: cursor was not settled on the circle at the ring deadline.')
+                    self.release();return
+                point=wintypes.POINT()
+                if not self.api.GetCursorPos(ctypes.byref(point)):raise OSError('Could not verify the cursor position')
                 if abs(point.x-x)>tolerance or abs(point.y-y)>tolerance:
-                    raise OSError('Cursor did not stay on target. Disable Roblox shift lock / first-person mouse lock; keep the mouse free while running.')
+                    self.last_cancellation=(now,'Click cancelled: cursor left the tracked circle before the ring deadline.')
+                    self.release();return
                 before=time.perf_counter()
                 if self._press(x,y,count,guard,generation,move=False):
                     self.scheduled=None
                     self.last_delivery={'planned':when,'sent':before,'lateness_ms':(before-when)*1000,
-                                        'cursor':[point.x,point.y],'target':[x,y]}
-                    if on_sent is not None:
-                        on_sent(dict(self.last_delivery))
+                                        'cursor':[point.x,point.y],'target':[x,y],
+                                        'movement_steps':self.movement_steps,
+                                        'travel_ms':(self.arrived_at-self.motion_started)*1000,
+                                        'settled_ms':(before-self.arrived_at)*1000}
+                    if on_sent is not None:on_sent(dict(self.last_delivery))
             except Exception as exc:
-                self.error=exc
-                self.release()
+                self.error=exc;self.release()
 
     def set_enabled(self,enabled):
         with self.lock:
@@ -293,6 +364,11 @@ class MouseInput:
             self.generation+=1
             self.scheduled=None
             self.prepared=False
+            self.motion=None
+            self.motion_expected=None
+            self.arrived_at=None
+            if self.motion_timer:
+                self.motion_timer.cancel();self.motion_timer=None
             self.retry_target=None
             if self.timer:
                 self.timer.cancel()

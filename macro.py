@@ -14,6 +14,16 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import cv2
 import mss
+# Layered-window GDI copying can flicker the physical cursor during capture.
+try:
+    from mss.windows import gdi as _mss_gdi
+    _mss_gdi.CAPTUREBLT=0
+except ImportError:
+    try:
+        import mss.windows as _mss_gdi
+        _mss_gdi.CAPTUREBLT=0
+    except ImportError:
+        pass
 import numpy as np
 from PIL import Image, ImageTk
 from vision import Detector, Tuner, parse_feedback, feedback_search_rect, detect_shu, ShuController, detect_en_prompt, recognize_en
@@ -368,6 +378,112 @@ def roblox_client_region():
     return {'left':point.x,'top':point.y,'width':rect.right,'height':rect.bottom}
 
 
+class RobloxWindowCapture:
+    """Capture Roblox independently of the foreground window and input state."""
+    def __init__(self,events):
+        self.events=events
+        self.lock=threading.Lock()
+        self.control=None
+        self.capture=None
+        self.hwnd=None
+        self.frame=None
+        self.stamp=0.
+        self.sequence=0
+        self.connecting=False
+        self.closed=False
+        self.attempt=0.
+        self.last_error=None
+        self.status='Desktop capture'
+        USER.FindWindowW.argtypes=[wintypes.LPCWSTR,wintypes.LPCWSTR]
+        USER.FindWindowW.restype=wintypes.HWND
+        USER.IsIconic.argtypes=[wintypes.HWND]
+        USER.IsWindow.argtypes=[wintypes.HWND]
+        USER.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+
+    def _connect(self,hwnd):
+        try:
+            from windows_capture import WindowsCapture
+            capture=WindowsCapture(window_hwnd=int(hwnd),cursor_capture=False,draw_border=False,minimum_update_interval=16)
+            @capture.event
+            def on_frame_arrived(frame,control):
+                if self.closed:
+                    control.stop();return
+                pixels=frame.frame_buffer[:,:,:3].copy()
+                with self.lock:
+                    self.frame=pixels;self.stamp=time.perf_counter();self.sequence+=1
+            @capture.event
+            def on_closed():
+                with self.lock:self.frame=None;self.hwnd=None;self.control=None
+            control=capture.start_free_threaded()
+            with self.lock:
+                stopped=self.closed
+                if not stopped:self.capture=capture;self.control=control;self.hwnd=hwnd
+            if stopped:
+                control.stop();return
+            self.last_error=None
+            self.events.put('Live Roblox window capture ready; detection continues when the macro panel is in front.')
+        except Exception as exc:
+            message=str(exc)
+            if message!=self.last_error:
+                self.events.put('Window capture unavailable; using cursor-safe desktop capture: '+message)
+                self.last_error=message
+        finally:self.connecting=False
+
+    def read(self,region):
+        now=time.perf_counter()
+        if not self.closed and self.control is None and not self.connecting and now-self.attempt>3:
+            self.attempt=now
+            hwnd=USER.FindWindowW(None,'Roblox')
+            if hwnd:
+                self.connecting=True
+                threading.Thread(target=self._connect,args=(hwnd,),daemon=True).start()
+        with self.lock:
+            pixels=self.frame
+            stamp=self.stamp;sequence=self.sequence;hwnd=self.hwnd
+        if hwnd and USER.IsIconic(hwnd):
+            self.status='Roblox minimized - restore it for live frames'
+            return np.zeros((region['height'],region['width'],3),np.uint8)
+        if pixels is None or not hwnd:
+            self.status='Starting window capture' if self.connecting else 'Desktop capture'
+            return None
+        age=now-stamp
+        if age>.6:
+            self.status='Waiting for a new Roblox frame - keep the game restored'
+            return np.zeros((region['height'],region['width'],3),np.uint8)
+        rect=wintypes.RECT();point=wintypes.POINT()
+        if not USER.GetClientRect(hwnd,ctypes.byref(rect)) or not USER.ClientToScreen(hwnd,ctypes.byref(point)):return None
+        cw,ch=rect.right,rect.bottom
+        if cw<=0 or ch<=0:return None
+        height,width=pixels.shape[:2]
+        cx=cy=0
+        if (width,height)!=(cw,ch):
+            outer=wintypes.RECT()
+            try:
+                dwm=ctypes.windll.dwmapi
+                dwm.DwmGetWindowAttribute.argtypes=[wintypes.HWND,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD]
+                if dwm.DwmGetWindowAttribute(hwnd,9,ctypes.byref(outer),ctypes.sizeof(outer))!=0:raise OSError('No visible frame bounds')
+            except OSError:USER.GetWindowRect(hwnd,ctypes.byref(outer))
+            cx=max(0,point.x-outer.left);cy=max(0,point.y-outer.top)
+        client=pixels[cy:min(height,cy+ch),cx:min(width,cx+cw)]
+        if client.shape[:2]!=(ch,cw):
+            self.status='Window geometry changed - waiting for matching frame'
+            return None
+        canvas=np.zeros((region['height'],region['width'],3),np.uint8)
+        x0=max(point.x,region['left']);y0=max(point.y,region['top'])
+        x1=min(point.x+cw,region['left']+region['width']);y1=min(point.y+ch,region['top']+region['height'])
+        if x1>x0 and y1>y0:
+            canvas[y0-region['top']:y1-region['top'],x0-region['left']:x1-region['left']]=client[y0-point.y:y1-point.y,x0-point.x:x1-point.x]
+        self.status=f'Live Roblox window - frame {sequence} - {age*1000:.0f} ms old'
+        return canvas
+
+    def close(self):
+        self.closed=True
+        with self.lock:control=self.control;self.control=None
+        if control:
+            try:control.stop()
+            except Exception:pass
+
+
 KEY_CODES={**{f'F{i}':0x6f+i for i in range(1,25)},**{c:ord(c) for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'},
            **{f'Numpad{i}':0x60+i for i in range(10)},
            'Space':0x20,'Home':0x24,'End':0x23,'Insert':0x2d,'Delete':0x2e,'Pause':0x13,
@@ -437,7 +553,6 @@ class App:
         self.root.minsize(710,920)
         self.running = threading.Event()
         self.closed = threading.Event()
-        self.preview_only = False
         self.frames = queue.Queue(maxsize=1)
         self.ocr_frames = queue.Queue(maxsize=1)
         self.results = queue.Queue()
@@ -447,6 +562,7 @@ class App:
         self.keyboard=KeyboardInput()
         self.deliveries = queue.Queue()
         self.events = ActivityQueue()
+        self.window_capture=RobloxWindowCapture(self.events)
         self.ocr_ready = False
         self.config = {'game':None,'feedback':None,'lead_ms':12.,'click_hold_ms':35.,'auto_feedback':True,'capture_mode':'custom'}
         if (BASE/'config.json').exists():
@@ -454,6 +570,10 @@ class App:
         self.config['click_hold_ms']=min(25,max(15,float(self.config['click_hold_ms'])))
         self.config.setdefault('start_key','F1')
         self.config.setdefault('pause_key','F2')
+        if self.config.get('cursor_motion_revision')!=1:
+            self.config.update(cursor_motion_revision=1,lead_ms=12.)
+            self.save()
+            self.events.put('Smooth cursor travel enabled; previous click timing reset for recalibration.')
         self.training=self.config.get('training_mode','Ren/Ten')
         if self.training not in ('Ren/Ten','Shu','En'):self.training='Ren/Ten'
         try:
@@ -465,7 +585,6 @@ class App:
         self.hotkeys=configured
         self.mouse=MouseInput(self.config['click_hold_ms'])
         self.status = tk.StringVar(value=f"Paused. Select a game area or full screen, then press {self.config['start_key']} in Roblox.")
-        self.mode = tk.BooleanVar(value=False)
         self.auto_feedback=tk.BooleanVar(value=self.config['auto_feedback'])
         self.feedback_info=tk.StringVar(value='Automatic feedback: waiting for a result')
         self.keys = {binding:binding_down(binding) for binding in self.hotkeys}
@@ -479,6 +598,7 @@ class App:
         self.latest_feedback='—'
         self.metrics=queue.Queue()
         self.scan_info=tk.StringVar(value='Waiting for a capture area')
+        self.capture_info=tk.StringVar(value='Live capture starts after choosing a game area')
         self.color_info=tk.StringVar(value='Checking colors…')
         self.panel_bounds=None
         self.live_tracks=()
@@ -523,6 +643,9 @@ class App:
         for name,description in (('Ren/Ten','Track shrinking rings and time clicks on the circles.'),('Shu','Hold to move right; release to move left. Keep the indicator inside the gold zone.'),('En','Read the letter above PRESS and tap it as soon as its timer appears.')):
             panel=tk.Frame(self.tabs,bg=card)
             tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,padx=12,pady=8).pack(anchor='w')
+            if name=='Ren/Ten':
+                tk.Label(panel,text='Meditation aura and other effects can interfere with circle detection. Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.',
+                         font=('Segoe UI',9),bg=card,fg='#e7c779',wraplength=680,justify='left',padx=12,pady=6).pack(anchor='w',fill='x')
             self.tabs.add(panel,text=name)
         self.tabs.select(('Ren/Ten','Shu','En').index(self.training))
         setup=tk.Frame(outer,bg=card,padx=16,pady=14)
@@ -538,9 +661,6 @@ class App:
             button.pack(side='left',padx=(0,8))
             if title=='Select feedback':self.feedback_select_button=button
             Tooltip(button,help_text)
-        preview_check=ttk.Checkbutton(row,text='Preview mode',variable=self.mode,command=self.set_mode)
-        preview_check.pack(side='right')
-        Tooltip(preview_check,'Checked: detect targets without sending mouse or keyboard input. Unchecked: allow the selected training controls after you press the start key. The live display works in both modes.')
         feedback_row=tk.Frame(setup,bg=card)
         feedback_row.pack(fill='x',pady=(0,5))
         auto_check=ttk.Checkbutton(feedback_row,text='Automatic feedback',variable=self.auto_feedback,command=self.set_feedback_mode)
@@ -584,10 +704,11 @@ class App:
         live_header.pack(fill='x',pady=(0,8))
         tk.Label(live_header,text='LIVE TRACKING',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(side='left')
         tk.Label(live_header,textvariable=self.scan_info,font=('Segoe UI',9),fg=accent,bg=card).pack(side='right')
-        self.preview=tk.Canvas(live,bg='#0c1119',height=160,highlightthickness=0)
+        self.preview=tk.Canvas(live,bg='#0c1119',height=110,highlightthickness=0)
         self.preview.pack(fill='both',expand=True)
         self.preview.create_text(350,110,text='Your game preview will appear here',fill=muted,font=('Segoe UI',12),tags='placeholder')
         self.preview.bind('<Configure>',lambda e:self.preview.coords('placeholder',e.width/2,e.height/2))
+        tk.Label(live,textvariable=self.capture_info,font=('Segoe UI',8),fg=muted,bg=card,anchor='w').pack(fill='x',pady=(4,0))
         legend=tk.Frame(live,bg=card)
         legend.pack(fill='x',pady=(7,0))
         self.legend_label=tk.Label(legend,text='',font=('Segoe UI',9),fg=muted,bg=card)
@@ -609,7 +730,7 @@ class App:
         self.update_key_hint()
         pause_button=ttk.Button(footer,text='Pause',command=self.stop_button)
         pause_button.pack(side='right')
-        Tooltip(pause_button,'Stop mouse input and cancel pending clicks. Target detection can continue while paused.')
+        Tooltip(pause_button,'Pause controls and cancel pending mouse or key input. Live tracking continues while paused.')
         self.refresh_training_ui()
         self.tabs.bind('<<NotebookTabChanged>>',self.change_training)
 
@@ -731,7 +852,7 @@ class App:
 
     def stop_button(self):
         self.pause()
-        self.status.set('Clicks PAUSED. Live display is separate from Preview mode. Focus Roblox and press the start key to resume.')
+        self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
 
     def save(self):
         (BASE/'config.json').write_text(json.dumps(self.config,indent=2))
@@ -745,13 +866,6 @@ class App:
             self.mouse.set_enabled(False)
         except OSError as exc:
             self.events.put(f'Mouse release failed: {exc}')
-
-    def set_mode(self):
-        self.pause()
-        self.preview_only = self.mode.get()
-        name='PREVIEW MODE' if self.preview_only else 'LIVE KEYS' if self.training=='En' else 'LIVE CLICKS'
-        self.status.set(f"{name} selected · PAUSED. Focus Roblox and press {self.config['start_key']} to start.")
-        self.events.put(f"Mode selected: {name}. {self.config['start_key']} in Roblox starts; changing mode pauses.")
 
     def select(self,key):
         self.pause()
@@ -903,19 +1017,23 @@ class App:
                         previous_tracks=()
                         last_region=region_key
                     start=time.perf_counter()
-                    frame=np.asarray(sct.grab(region))[:,:,:3].copy()
+                    frame=self.window_capture.read(region)
+                    window_frame=frame is not None
+                    if frame is None:frame=np.asarray(sct.grab(region))[:,:,:3].copy()
+                    self.metrics.put(('capture_status',self.window_capture.status))
                     # When inspecting the panel, do not detect circles inside
                     # its own scaled preview. Bounds are cached by the UI thread.
                     bounds=self.panel_bounds
-                    if bounds and not foreground_is_roblox():
+                    if bounds and not window_frame and not foreground_is_roblox():
                         px,py,pw,ph=bounds
                         x0=max(0,px-region['left']); y0=max(0,py-region['top'])
                         x1=min(frame.shape[1],px+pw-region['left']); y1=min(frame.shape[0],py+ph-region['top'])
                         if x1>x0 and y1>y0:
                             frame[y0:y1,x0:x1]=0
-                    stamp=(start+time.perf_counter())/2
-                    frame_interval=.85*frame_interval+.15*min(.1,stamp-last_stamp)
-                    last_stamp=stamp
+                    stamp=self.window_capture.stamp if window_frame and self.window_capture.stamp else (start+time.perf_counter())/2
+                    processed_at=time.perf_counter()
+                    frame_interval=.85*frame_interval+.15*min(.1,max(.001,processed_at-last_stamp))
+                    last_stamp=processed_at
                     detection_scale=min(1.,960/frame.shape[1])
                     detection_frame=cv2.resize(frame,None,fx=detection_scale,fy=detection_scale,interpolation=cv2.INTER_AREA) if detection_scale<1 else frame
                     if self.training=='En':
@@ -951,12 +1069,12 @@ class App:
                             en_key=key
                             def key_allowed(sid=session):
                                 return (self.running.is_set() and self.session==sid and not self.closed.is_set()
-                                        and self.training=='En' and not self.preview_only and foreground_is_roblox()
+                                        and self.training=='En' and foreground_is_roblox()
                                         and not any(binding_down(b) for b in self.hotkeys if not self.keyboard.suppresses(b))
                                         and not any(ctypes.windll.user32.GetAsyncKeyState(v)&0x8000 for v in (0x10,0x11,0x12,0x5B,0x5C)))
-                            if self.preview_only or not self.running.is_set():
+                            if not self.running.is_set():
                                 en_sent=True
-                                self.events.put(f'En recognized {key}; input disabled while paused or in Preview mode.')
+                                self.events.put(f'En recognized {key}; input disabled while paused.')
                             elif self.keyboard.tap(key,key_allowed):
                                 en_sent=True;en_count+=1
                                 self.events.put(f'En prompt {key}: key sent.')
@@ -978,7 +1096,7 @@ class App:
                             if sid==session and now-ts<1 and value is not None and value!=en_last_feedback:
                                 en_last_feedback=value
                                 self.events.put('En result: '+(value if value=='MISS' else f'{value:+.2f}'))
-                        if now-last_preview>.08:
+                        if now-last_preview>.05:
                             if prompt:
                                 x0,y0,x1,y1=[round(v/detection_scale) for v in prompt.rect]
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(255,240,40),2)
@@ -1002,7 +1120,7 @@ class App:
                             return (self.running.is_set() and not self.closed.is_set() and self.session==sid
                                     and self.training=='Shu' and foreground_is_roblox()
                                     and not any(binding_down(binding) for binding in self.hotkeys))
-                        active=self.running.is_set() and not self.preview_only
+                        active=self.running.is_set()
                         self.mouse.set_hold(bool(bar and holding and active),guard=hold_allowed)
                         if bar:
                             shu_last_seen=now
@@ -1019,7 +1137,7 @@ class App:
                         if shu.cycles!=shu_cycles:
                             self.events.put('Shu focus reached full and reset; continuing the next cycle.')
                             shu_cycles=shu.cycles
-                        if now-last_preview>.08:
+                        if now-last_preview>.05:
                             if bar:
                                 x0,x1=round(bar.zone_left/detection_scale),round(bar.zone_right/detection_scale)
                                 y0,y1=round(bar.top/detection_scale),round(bar.bottom/detection_scale)
@@ -1027,7 +1145,7 @@ class App:
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(40,200,245),2)
                                 cv2.line(frame,(marker,y0-3),(marker,y1+3),(255,240,40),2)
                             self.latest(self.frames,frame)
-                            action='Paused' if not self.running.is_set() else ('Would hold' if holding else 'Would release') if self.preview_only else 'Holding' if self.mouse.pressed else 'Released'
+                            action='Paused' if not self.running.is_set() else 'Holding' if self.mouse.pressed else 'Released'
                             self.metrics.put(('shu',{'focus':bar.focus if bar else None,'cycles':shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
                             last_preview=now
                         self.closed.wait(.003 if self.running.is_set() else .045)
@@ -1091,7 +1209,7 @@ class App:
                             pending=None
                         elif pending and value!=pending['baseline']:
                             pending['armed']=True
-                        elif not pending and value=='MISS' and feedback_count==2 and not self.preview_only and not self.config.get('auto_feedback',True):
+                        elif not pending and value=='MISS' and feedback_count==2 and not self.config.get('auto_feedback',True):
                             msg=tuner.feedback(value)
                             self.config['lead_ms']=tuner.lead_ms
                             self.save()
@@ -1111,14 +1229,14 @@ class App:
                         if remaining is None or t.clicked:
                             continue
                         if getattr(t,'scheduled',False):
-                            if not self.preview_only:
-                                self.mouse.retime(now+remaining-tuner.lead_ms/1000)
+                            self.mouse.update_target(round(region['left']+t.x/detection_scale),round(region['top']+t.y/detection_scale))
+                            self.mouse.retime(now+remaining-tuner.lead_ms/1000)
                             continue
                         if now-last_click<.35:
                             continue
                         # Reserve the target well before contact. The mouse
                         # timer, not the next screen frame, dispatches input.
-                        if now-t.seen>.14 or remaining>.18:
+                        if now-t.seen>.14 or remaining>.85:
                             continue
                         if remaining<0:
                             t.scheduled=True
@@ -1127,11 +1245,7 @@ class App:
                             continue
                         x=round(region['left']+t.x/detection_scale)
                         y=round(region['top']+t.y/detection_scale)
-                        if self.preview_only:
-                            t.clicked=True
-                            last_click=now
-                            self.events.put(f'Preview: would click ({x}, {y}); predicted match in {remaining*1000:.1f} ms')
-                        elif self.running.is_set() and session==self.session and foreground_is_roblox():
+                        if self.running.is_set() and session==self.session and foreground_is_roblox():
                             # Check stop key immediately before sending mouse input, independently of the UI timer.
                             if any(binding_down(binding) for binding in self.hotkeys):
                                 for key in self.hotkeys:
@@ -1140,13 +1254,13 @@ class App:
                                 self.pause()
                                 self.events.put('Paused by stop key')
                                 break
-                            planned=max(now+.026,now+remaining-tuner.lead_ms/1000)
+                            planned=now+remaining-tuner.lead_ms/1000
                             def burst_allowed(sid=session,target=t):
                                 return (self.running.is_set() and not self.closed.is_set()
                                         and self.session==sid
                                         and time.perf_counter()-target.seen<.20
-                                        and not any(other is not target and other.born>target.born+.10
-                                                    and other.ring is not None and len(other.history)>=3 for other in self.live_tracks)
+                                        and (not target.clicked or not any(other is not target and other.born>target.born+.10
+                                                    and other.ring is not None and len(other.history)>=3 for other in self.live_tracks))
                                         and foreground_is_roblox()
                                         and not any(binding_down(binding) for binding in self.hotkeys))
                             def on_sent(details,target=t,sid=session):
@@ -1156,7 +1270,8 @@ class App:
                                 self.events.put(f"Mouse delivered at {details['cursor']} • timer error {details['lateness_ms']:+.1f} ms")
                             if not self.mouse.schedule_click(x,y,planned,count=None,guard=burst_allowed,on_sent=on_sent,
                                                              tolerance=max(8,round(t.radius/detection_scale*.35))):
-                                self.events.put('Click cancelled: focus or stop state changed')
+                                t.scheduled=True
+                                self.events.put('Timed click skipped: target changed or there was insufficient smooth travel time.')
                                 continue
                             t.scheduled=True
                             last_click=planned
@@ -1178,7 +1293,7 @@ class App:
                             feedback_image=np.asarray(sct.grab(feedback))[:,:,:3].copy()
                         self.latest(self.ocr_frames,(session,now,feedback_image,automatic))
                         last_ocr=now
-                    if now-last_preview>.10:
+                    if now-last_preview>.05:
                         for t in tracks:
                             cv2.circle(frame,(round(t.x/detection_scale),round(t.y/detection_scale)),round(t.radius/detection_scale),(0,255,0),2)
                             if t.ring:
@@ -1204,17 +1319,15 @@ class App:
             return
         if self.running.is_set():
             self.pause()
-            self.status.set('Clicks PAUSED. Live display is separate from Preview mode. Focus Roblox and press the start key to resume.')
+            self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
             return
-        # Synchronize directly with the visible checkbox at every start.
-        self.preview_only=bool(self.mode.get())
         if not self.config.get('game'):
             self.status.set('Select game or Use full screen first.')
             return
         if self.training=='Ren/Ten' and not self.config.get('auto_feedback',True) and not self.config.get('feedback'):
             self.status.set('Select feedback manually or enable Automatic feedback.')
             return
-        if not self.preview_only and ((self.training=='Ren/Ten' and not self.ocr_ready) or (self.training=='En' and not self.en_ready)):
+        if (self.training=='Ren/Ten' and not self.ocr_ready) or (self.training=='En' and not self.en_ready):
             self.status.set('Wait for feedback OCR to load before enabling clicks.')
             return
         if not foreground_is_roblox():
@@ -1222,13 +1335,13 @@ class App:
             return
         self.session+=1
         self.running.set()
-        self.mouse.set_enabled(not self.preview_only)
-        self.events.put(f'Started {self.training}: '+('PREVIEW MODE — input disabled' if self.preview_only else 'LETTER KEY CONTROL' if self.training=='En' else 'HOLD / RELEASE CONTROL' if self.training=='Shu' else 'LIVE CLICKS — target-aware click retries'))
+        self.mouse.set_enabled(True)
+        self.events.put(f'Started {self.training}: '+('LETTER KEY CONTROL' if self.training=='En' else 'HOLD / RELEASE CONTROL' if self.training=='Shu' else 'LIVE CLICKS — target-aware click retries'))
         with (BASE/'LOGS.jsonl').open('a') as log:
-            log.write(json.dumps({'time':time.time(),'event':'started','preview_only':self.preview_only})+'\n')
+            log.write(json.dumps({'time':time.time(),'event':'started','training':self.training})+'\n')
         # Keep the panel out of the captured playfield while input is active.
         self.root.iconify()
-        self.status.set('Running — '+('PREVIEW MODE: INPUT DISABLED' if self.preview_only else 'KEYS ENABLED' if self.training=='En' else 'CLICKS ENABLED')+f" — {self.config['pause_key']} pauses")
+        self.status.set(f"Running {self.training} — {self.config['pause_key']} pauses")
 
     def pump(self):
         if self.root.state()=='normal':
@@ -1260,7 +1373,9 @@ class App:
                 kind,value=self.metrics.get_nowait()
             except queue.Empty:
                 break
-            if kind=='en':
+            if kind=='capture_status':
+                self.capture_info.set(value)
+            elif kind=='en':
                 if self.training!='En':continue
                 self.stat_labels[0].configure(text=str(value['count']))
                 result=value['result']
@@ -1295,14 +1410,14 @@ class App:
                 self.stat_labels[1].configure(text=text,fg='#ffaf8a' if value=='MISS' or value<.04 else '#63e5bf')
                 self.feedback_info.set(('Automatic feedback: ' if self.config.get('auto_feedback',True) else 'Manual feedback: ')+text)
         active=self.running.is_set()
-        mode_name='PREVIEW MODE' if self.preview_only else 'LIVE KEYS' if self.training=='En' else 'LIVE CLICKS'
+        mode_name=self.training
         self.badge.configure(text=f'  {mode_name} / '+('RUNNING  ' if active else 'PAUSED  '),fg='#63e5bf' if active else '#98a7bc')
         if self.capture_error:
             self.badge.configure(text='  ERROR / INPUT STOPPED  ',fg='#ffaf8a')
             self.status.set('ERROR: '+self.capture_error+'. Restart the macro after correcting this.')
             self.scan_info.set('Stopped — see Activity')
         if not active and self.status.get().startswith('Running'):
-            self.status.set('Clicks PAUSED. Live display is separate from Preview mode. Focus Roblox and press the start key to resume.')
+            self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
         while True:
             try:
                 event=self.events.get_nowait()
@@ -1317,6 +1432,7 @@ class App:
     def close(self):
         self.pause()
         self.closed.set()
+        self.window_capture.close()
         self.root.destroy()
 
 

@@ -41,7 +41,7 @@ def run_logged(command,event):
 
 
 def probe_dependencies():
-    code="import sys; sys.path.insert(0,sys.argv[1]); import tkinter; import cv2,mss,numpy,onnxruntime; from PIL import Image,ImageTk; from rapidocr_onnxruntime import RapidOCR"
+    code="import sys; sys.path.insert(0,sys.argv[1]); import tkinter; import cv2,mss,numpy,onnxruntime,windows_capture; from PIL import Image,ImageTk; from rapidocr_onnxruntime import RapidOCR"
     return subprocess.run([sys.executable,'-I','-c',code,str(BASE/'packages')],capture_output=True,text=True,encoding='utf-8',errors='replace')
 
 
