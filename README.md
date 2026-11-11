@@ -8,9 +8,10 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 
 ## Windows security notice
 
-Windows may show **"Open File - Security Warning"** when opening the downloaded launcher. This is a standard downloaded-file prompt; by itself, it does not mean a virus was detected. [Learn more from Microsoft](https://support.microsoft.com/en-gb/windows/security/information-about-the-attachment-manager-in-microsoft-windows).
-
-Beyond Nen Meditation Macro is a community-made tool designed specifically for Beyond Nen training, with privacy in mind. Gameplay images are processed locally, and the macro does not request your Roblox login or upload images, settings, or logs. The source code is publicly available here if you'd like to review how it works.
+> [!IMPORTANT]
+> Windows may show **"Open File - Security Warning"** when opening the downloaded launcher. This is a standard downloaded-file prompt; by itself, it does not mean a virus was detected. [Learn more from Microsoft](https://support.microsoft.com/en-gb/windows/security/information-about-the-attachment-manager-in-microsoft-windows).
+>
+> Beyond Nen Meditation Macro is a community-made tool designed specifically for Beyond Nen training, with privacy in mind. Gameplay images are processed locally, and the macro does not request your Roblox login or upload images, settings, or logs. The source code is publicly available here if you'd like to review how it works.
 
 ## What's new — v1.0.6
 
