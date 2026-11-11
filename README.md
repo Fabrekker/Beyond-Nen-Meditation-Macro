@@ -2,9 +2,9 @@
 
 A Windows macro for Beyond Nen meditation training on Roblox, created with AI assistance.
 
-> **IMPORTANT â€” Extract All before launching:** right-click the downloaded ZIP, choose **Extract All**, then run **Start Macro.exe** inside the extracted folder. Keep all files together. Running the launcher inside the ZIP causes the missing `bootstrap.py` error.
+> **IMPORTANT - Extract All before launching:** right-click the downloaded ZIP, choose **Extract All**, then run **Start Macro.exe** inside the extracted folder. Keep all files together. Running the launcher inside the ZIP causes the missing `bootstrap.py` error.
 
-**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.7/nen-macro-1.0.7.zip)** â€” the same download works for new installs and updates.
+**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.7/nen-macro-1.0.7.zip)** - the same download works for new installs and updates.
 
 ## Windows security notice
 
