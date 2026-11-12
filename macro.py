@@ -484,8 +484,8 @@ class RobloxWindowCapture:
             except Exception:pass
 
 
-TRAINING_MODES=('Ren/Ten','Shu/Gyo/Zetsu','En/Ken','Ko')
-BAR_MODES=('Shu/Gyo/Zetsu','Ko')
+TRAINING_MODES=('Ren/Ten','Shu/Gyo/Zetsu','En/Ken','Ko/RyuS/RyuD')
+BAR_MODES=('Shu/Gyo/Zetsu','Ko/RyuS/RyuD')
 
 KEY_CODES={**{f'F{i}':0x6f+i for i in range(1,25)},**{c:ord(c) for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'},
            **{f'Numpad{i}':0x60+i for i in range(10)},
@@ -578,11 +578,12 @@ class App:
             self.save()
             self.events.put('Smooth cursor travel enabled; previous click timing reset for recalibration.')
         saved_training=self.config.get('training_mode','Ren/Ten')
-        self.training={'Shu':'Shu/Gyo/Zetsu','En':'En/Ken'}.get(saved_training,saved_training)
+        self.training={'Shu':'Shu/Gyo/Zetsu','En':'En/Ken','Ko':'Ko/RyuS/RyuD','Ko/RyuS':'Ko/RyuS/RyuD'}.get(saved_training,saved_training)
         if self.training not in TRAINING_MODES:self.training='Ren/Ten'
         self.control_preferences={}
-        for mode,default in [('Shu/Gyo/Zetsu','Left click'),('Ko','Space')]:
-            value=self.config.get('bar_inputs',{}).get(mode,default)
+        for mode,default in [('Shu/Gyo/Zetsu','Left click'),('Ko/RyuS/RyuD','Space')]:
+            saved_inputs=self.config.get('bar_inputs',{})
+            value=saved_inputs.get(mode,saved_inputs.get('Ko/RyuS',saved_inputs.get('Ko',default)) if mode=='Ko/RyuS/RyuD' else default)
             self.control_preferences[mode]=value if value in ('Left click','Space') else default
         self.control_vars={mode:tk.StringVar(value=value) for mode,value in self.control_preferences.items()}
         try:
@@ -651,7 +652,8 @@ class App:
                   expand=[('selected',(0,0,0,0)),('!selected',(0,0,0,0))])
         self.tabs=ttk.Notebook(outer)
         self.tabs.pack(fill='x',pady=(0,10))
-        for name,description in (('Ren/Ten','To get the mouse to exit movement, simply stop the macro with your keybind.'),('Shu/Gyo/Zetsu','The macro holds and releases the selected input to keep the indicator inside the target zone.'),('En/Ken','The macro reads each letter prompt and presses the matching key before the timer runs out.'),('Ko','The macro holds the selected input and releases it in the gold zone to finish each attempt.')):
+        self.menu_hint=tk.StringVar()
+        for name,description in (('Ren/Ten','To get the mouse to exit movement, simply stop the macro with your keybind.'),('Shu/Gyo/Zetsu','The macro holds and releases the selected input to keep the indicator inside the target zone.'),('En/Ken','The macro reads each letter prompt and presses the matching key before the timer runs out.'),('Ko/RyuS/RyuD','The macro holds the selected input and releases it in the gold zone to finish each attempt.')):
             panel=tk.Frame(self.tabs,bg=card)
             tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,padx=12,pady=8).pack(anchor='w')
             if name in BAR_MODES:
@@ -666,6 +668,8 @@ class App:
                          font=('Segoe UI',9),bg=card,fg='#e7c779',wraplength=680,justify='left',padx=12,pady=6).pack(anchor='w',fill='x')
             tk.Label(panel,text='Press Tab in Roblox to clear the top-right area for the best visibility.',
                      font=('Segoe UI',8),bg=card,fg=muted,padx=12,pady=4).pack(anchor='w')
+            tk.Label(panel,textvariable=self.menu_hint,font=('Segoe UI',9),fg=accent,bg=card,
+                     wraplength=680,justify='left',anchor='w',padx=12,pady=6).pack(fill='x')
             self.tabs.add(panel,text=name)
         self.tabs.select(TRAINING_MODES.index(self.training))
         setup=tk.Frame(outer,bg=card,padx=16,pady=14)
@@ -699,8 +703,6 @@ class App:
             record=ttk.Button(bindings,text='Record',command=lambda v=variable:self.record_keybind(v))
             record.pack(side='left',padx=(0,14))
             Tooltip(record,'Press your desired keyboard key, with optional Ctrl, Alt, Shift or Win modifiers. Click Cancel to leave the binding unchanged.')
-        self.menu_hint=tk.StringVar()
-        tk.Label(setup,textvariable=self.menu_hint,font=('Segoe UI',9),fg=accent,bg=card,anchor='w').pack(fill='x',pady=(2,4))
         self.area_label=tk.Label(setup,text='',font=('Segoe UI',9),fg=muted,bg=card,anchor='w')
         self.area_label.pack(fill='x')
         self.update_area_label()
@@ -757,7 +759,7 @@ class App:
     def refresh_training_ui(self):
         shu=self.training in BAR_MODES
         en=self.training=='En/Ken'
-        ko=self.training=='Ko'
+        ko=self.training=='Ko/RyuS/RyuD'
         self.update_area_label()
         for label,text in zip(self.stat_titles,('KEYS SENT','LAST RESULT','PROMPT') if en else ('ROUND','ATTEMPTS','CONTROL') if ko else ('FOCUS','CYCLES','CONTROL') if shu else ('TARGETS CLICKED','LAST RESULT','CLICK PATTERN')):
             label.configure(text=text)
@@ -766,7 +768,7 @@ class App:
         self.legend_label.configure(text='Cyan: verified prompt area; unclear letters are skipped' if en else 'Gold: target zone   •   Cyan: indicator' if shu else 'Green: target    •    Magenta: shrinking ring')
         self.feedback_select_button.state(['disabled'] if shu else ['!disabled'])
         self.auto_feedback_check.state(['disabled'] if shu else ['!disabled'])
-        if shu:self.feedback_info.set('Ko releases in the gold zone' if ko else 'Focus is read directly from the bar')
+        if shu:self.feedback_info.set('Ko/RyuS/RyuD releases in the gold zone' if ko else 'Focus is read directly from the bar')
         else:self.feedback_info.set('Automatic feedback: waiting for a result' if self.config.get('auto_feedback',True) else 'Manual feedback selected')
         self.color_info.set('Waiting for En prompt' if en else 'Waiting for bar' if shu else 'Checking colors…')
 
@@ -793,7 +795,7 @@ class App:
 
     def update_key_hint(self):
         self.key_hint.set(f"{self.config['start_key']}  Start / pause     {self.config['pause_key']}  Pause")
-        self.menu_hint.set(f"Stay in meditation: open Roblox menu (Esc) → press {self.config['start_key']} → close menu.")
+        self.menu_hint.set("To start the macro without getting kicked from the meditation:\nOpen the Roblox menu, press your configured start keybind, then close the menu to return to the minigame. Pressing your start keybind directly during meditation can interrupt it.")
 
     def set_keybinds(self,event=None):
         self.pause()
@@ -852,7 +854,7 @@ class App:
         for key in ('game','feedback'):
             region=self.config.get(key)
             if key=='feedback' and self.training in BAR_MODES:
-                parts.append('Feedback: target zone' if self.training=='Ko' else 'Feedback: focus meter')
+                parts.append('Feedback: target zone' if self.training=='Ko/RyuS/RyuD' else 'Feedback: focus meter')
             elif key=='feedback' and self.config.get('auto_feedback',True):
                 parts.append('Feedback: automatic'+(' (manual saved)' if region else ''))
             else:
@@ -1151,7 +1153,7 @@ class App:
                         now=time.perf_counter()
                         control=self.control_preferences[self.training]
                         active=self.running.is_set()
-                        is_ko=self.training=='Ko'
+                        is_ko=self.training=='Ko/RyuS/RyuD'
                         holding=ko.update(bar,now,active) if is_ko else shu.update(bar,now)
                         def hold_allowed(sid=session,mode=self.training,selected=control):
                             return (self.running.is_set() and not self.closed.is_set() and self.session==sid
@@ -1178,7 +1180,7 @@ class App:
                                 self.events.put(f'No {self.training} bar detected. Check the capture area and keep the minigame visible; input is released.')
                                 shu_missing_reported=True
                         if is_ko and ko.attempts!=last_ko_attempts:
-                            self.events.put('Ko input released in the target zone; waiting for the next attempt.')
+                            self.events.put('Ko/RyuS/RyuD input released in the target zone; waiting for the next attempt.')
                             last_ko_attempts=ko.attempts
                         if not is_ko and shu.cycles!=shu_cycles:
                             self.events.put(f'{self.training} focus reached full and reset; continuing the next cycle.')
@@ -1436,7 +1438,7 @@ class App:
             elif kind=='shu':
                 if self.training not in BAR_MODES:continue
                 if value.get('mode',self.training)!=self.training:continue
-                self.stat_labels[0].configure(text=value.get('phase','Waiting') if self.training=='Ko' else '—' if value['focus'] is None else f"{value['focus']*100:.0f}%")
+                self.stat_labels[0].configure(text=value.get('phase','Waiting') if self.training=='Ko/RyuS/RyuD' else '—' if value['focus'] is None else f"{value['focus']*100:.0f}%")
                 self.stat_labels[1].configure(text=str(value['cycles']))
                 self.stat_labels[2].configure(text=value['action'])
                 self.scan_info.set(f"{self.training} {'tracking' if value['tracked'] else 'searching'}  •  {value['fps']:.0f} fps")

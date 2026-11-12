@@ -4,7 +4,7 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 
 > **IMPORTANT - Extract All before launching:** right-click the downloaded ZIP, choose **Extract All**, then run **Start Macro.exe** inside the extracted folder. Keep all files together. Running the launcher inside the ZIP causes the missing `bootstrap.py` error.
 
-**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.7/nen-macro-1.0.7.zip)** - the same download works for new installs and updates.
+**[Download the macro ZIP](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.8/nen-macro-1.0.8.zip)** - the same download works for new installs and updates.
 
 ## Windows security notice
 
@@ -13,19 +13,18 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 >
 > Beyond Nen Meditation Macro is a community-made tool designed specifically for Beyond Nen training, with privacy in mind. Gameplay images are processed locally, and the macro does not request your Roblox login or upload images, settings, or logs. The source code is publicly available here if you'd like to review how it works.
 
-## What's new — v1.0.7
+## What's new - v1.0.8
 
-- Custom-icon Start/Update applications and a graphical updater, with supporting files kept in App.
-- Better discovery of installed Python, plus an option to select an existing installation.
-- New Ko training, shared Shu/Gyo/Zetsu and En/Ken tabs, and Left click/Space choices for bar training.
-- Consistent tab sizes and clearer visibility and mouse-control guidance.
+- All currently known Nen techniques are now implemented and should work with their matching training mode. If you run into any issues, please [let us know](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/issues).
+- Renamed Ko to **Ko/RyuS/RyuD** for Ko, Ryu Strength, and Ryu Defense, preserving saved control preferences.
+- Moved meditation startup instructions to the top of every tab, using your configured start keybind.
 
 ## Features
 
 - **Ren/Ten:** color-aware circle detection, smooth cursor travel, ring-timed clicks, and result-based timing adjustments toward **+0.04 or higher**.
 - **Shu/Gyo/Zetsu:** hold/release control to keep the indicator inside the target zone until focus fills; choose left-click or Space.
 - **En/Ken:** read letter prompts and tap the matching key; unclear prompts are skipped.
-- **Ko:** hold the selected input and release it in the gold zone to finish each attempt; choose left-click or Space.
+- **Ko/RyuS/RyuD:** hold the selected input and release it in the gold zone to finish each attempt; choose left-click or Space.
 - Full-screen or custom capture, automatic result reading, and a manual result-area option.
 - Configurable start/pause keybinds and live tracking that continues while paused. Starts paused; the start key enables controls.
 - Input stops on pause, tab changes, or loss of Roblox focus. GitHub updates preserve saved settings.
@@ -38,7 +37,7 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 The information below covers initial setup, general requirements, and manual download links in case they are needed.
 
 1. On **64-bit Windows 10 or 11**, install **[Python 3.12 for Windows (64-bit)](https://www.python.org/downloads/release/python-31210/)**. Keep **pip**, **Tcl/Tk and IDLE**, and the **Python launcher** enabled in the installer. RapidOCR 1.4.4 requires Python below 3.13; use 3.12 for this macro.
-2. Download **nen-macro-1.0.7.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep both launchers beside the `App` folder; do not move individual files.
+2. Download **nen-macro-1.0.8.zip** from [Releases](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/latest). Right-click the ZIP and choose **Extract All**. **Do not run the launcher from inside the ZIP or copy it out on its own.** Keep both launchers beside the `App` folder; do not move individual files.
 3. Open **Start Macro.exe**. Keep the **App** folder beside both launchers. The launcher opens the GUI directly; setup progress appears only when dependencies need installation. **Update Macro.exe** opens the graphical updater.
 4. Choose your training tab and game capture area. **F1** starts/pauses and **F2** pauses by default. Close the macro and open **Update Macro.exe** for published updates.
 
@@ -67,4 +66,4 @@ These are Python libraries, not separate apps you need to download manually. The
 
 **Ren/Ten visibility:** meditation aura and other effects can interfere with circle detection. **Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.** Keep the mouse unlocked and avoid moving it manually during circle training; manual movement cancels the current glide.
 
-The `.pkg` and `update.json` release assets are used by the automatic updater. For a manual download, use **nen-macro-1.0.7.zip**. Existing installations retain their settings.
+The `.pkg` and `update.json` release assets are used by the automatic updater. For a manual download, use **nen-macro-1.0.8.zip**. Existing installations retain their settings.
