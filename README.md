@@ -13,11 +13,6 @@ A Windows macro for Beyond Nen meditation training on Roblox.
 >
 > Beyond Nen Meditation Macro is a community-made tool designed specifically for Beyond Nen training, with privacy in mind. Gameplay images are processed locally, and the macro does not request your Roblox login or upload images, settings, or logs. The source code is publicly available here if you'd like to review how it works.
 
-## What is new - 1.1
-
-- Fixed errors when switching training modes.
-- Added in-app Retry for tracking and reader errors, without restarting the macro. Controls stay paused during recovery.
-
 ## Features
 
 - **Ren/Ten:** color-aware circle detection, smooth cursor travel, ring-timed clicks, and result-based timing adjustments toward **+0.04 or higher**.
@@ -28,6 +23,11 @@ A Windows macro for Beyond Nen meditation training on Roblox.
 - Full-screen or custom minigame capture, automatic result reading, and a manual result-area option.
 - Configurable start/pause keybinds and live tracking that continues while paused. Starts paused; the start key enables controls.
 - Input stops on pause, tab changes, or loss of Roblox focus. GitHub updates preserve saved settings.
+
+## What is new - 1.1
+
+- Fixed errors when switching training modes.
+- Added in-app Retry for tracking and reader errors, without restarting the macro. Controls stay paused during recovery.
 
 ## Getting started
 
