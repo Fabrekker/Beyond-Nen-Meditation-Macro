@@ -121,15 +121,15 @@ def graphical_update():
                 release=updater.check(BASE)
                 if release is None:
                     create_app_shortcuts()
-                    events.put(('done',"You're up to date.",'Installed version: '+updater.current(BASE)));return
-                events.put(('status','Downloading version '+release['version']+'...','The download will be checked before installation.'))
+                    events.put(('done',"You're up to date.",'Installed version: '+updater.display_version(updater.current(BASE))));return
+                events.put(('status','Downloading version '+updater.display_version(release['version'])+'...','The download will be checked before installation.'))
                 updater.stage(release,BASE)
                 events.put(('status','Installing update...','Please keep this window open.'))
                 updater.apply_pending(BASE)
                 clean_desktop_legacy_files()
                 try:create_app_shortcuts()
                 except Exception:record_error('shortcut_creation_failed',traceback.format_exc())
-                events.put(('done','Updated to version '+updater.current(BASE)+'.','Open Start Macro to use the updated application.'))
+                events.put(('done','Updated to version '+updater.display_version(updater.current(BASE))+'.','Open Start Macro to use the updated application.'))
         except Exception:
             record_error('graphical_update_failed',traceback.format_exc())
             events.put(('error','The update could not be completed.','Details are saved locally in LOGS.jsonl. You can try again later.'))
@@ -191,12 +191,12 @@ def main():
                 release=updater.check(BASE)
                 if release:
                     if quiet:return launch_bootstrap(quiet=False)
-                    print('Installing update '+release['version'])
+                    print('Installing update '+updater.display_version(release['version']))
                     updater.stage(release,BASE)
                     updater.apply_pending(BASE)
-                    print('Updated to '+release['version'])
+                    print('Updated to '+updater.display_version(release['version']))
                 elif update_only:
-                    print('Already up to date: '+updater.current(BASE))
+                    print('Already up to date: '+updater.display_version(updater.current(BASE)))
         except Exception as exc:
             print('Update unavailable; continuing with the installed version:',exc)
             if update_only: return 1

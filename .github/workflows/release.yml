@@ -29,15 +29,17 @@ jobs:
         shell: bash
         run: |
           VERSION=$(python -c 'import json; print(json.load(open("version.json"))["version"])')
+          LABEL=$(python -c 'import json; from updater import display_version; print(display_version(json.load(open("version.json"))["version"]))')
           python make_release.py --version "$VERSION" --repo "$GITHUB_REPOSITORY"
+          echo "RELEASE_LABEL=$LABEL" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          TAG="v$RELEASE_VERSION"
-          TITLE="Beyond Nen Macro $RELEASE_VERSION"
+          TAG="v$RELEASE_LABEL"
+          TITLE="Beyond Nen Macro $RELEASE_LABEL"
           if gh release view "$TAG" --json isDraft > release-state.json 2>/dev/null; then
             if python -c 'import json,sys; sys.exit(0 if json.load(open("release-state.json"))["isDraft"] else 1)'; then
               echo "Resuming the existing draft release."
@@ -49,8 +51,8 @@ jobs:
               --title "$TITLE" --notes-file RELEASE_NOTES.md
           fi
           gh release upload "$TAG" --clobber \
-            "releases/$RELEASE_VERSION/nen-macro-$RELEASE_VERSION.zip" \
-            "releases/$RELEASE_VERSION/app-files-$RELEASE_VERSION.pkg" \
+            "releases/$RELEASE_VERSION/nen-macro-$RELEASE_LABEL.zip" \
+            "releases/$RELEASE_VERSION/app-files-$RELEASE_LABEL.pkg" \
             "releases/$RELEASE_VERSION/update.json"
           gh release edit "$TAG" --draft=false --latest \
             --title "$TITLE" --notes-file RELEASE_NOTES.md

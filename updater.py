@@ -22,6 +22,11 @@ def version(value):
         raise ValueError('Version must use three numbers, for example 1.0.1')
     return tuple(map(int,value.split('.')))
 
+def display_version(value):
+    major,minor,patch=version(value)
+    return f'{major}.{minor}' if patch==0 else value
+
+
 def https_url(url):
     parsed=urllib.parse.urlsplit(url)
     if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:

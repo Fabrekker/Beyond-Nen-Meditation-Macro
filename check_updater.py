@@ -76,3 +76,10 @@ personal='{"automatic":false,"manifest_url":"https://example.com/custom.json"}'
 bootstrap.prepare_update_settings(fresh)
 assert (fresh/'update-settings.json').read_text()==personal
 print('PASS: fresh-install defaults and existing update preferences preserved.')
+
+assert updater.display_version('1.1.0')=='1.1'
+assert updater.display_version('1.1.1')=='1.1.1'
+assert updater.display_version('1.1.9')=='1.1.9'
+assert updater.display_version('1.2.0')=='1.2'
+assert updater.version('1.2.0')>updater.version('1.1.9')>updater.version('1.1.0')
+print('PASS: display versions 1.1, 1.1.1 through 1.1.9, then 1.2; update ordering preserved.')

@@ -753,6 +753,12 @@ class App:
         self.pause_key=tk.StringVar(value=self.config['pause_key'])
         self.key_hint=tk.StringVar()
         self.capture_error=None
+        self.error_source=None
+        self.recovering=False
+        self.capture_stop=threading.Event()
+        self.capture_thread=None
+        self.ocr_threads={}
+        self._pump_job=None
         self.recording=False
         self.session = 0
         self.sent_count=0
@@ -771,17 +777,73 @@ class App:
         self.root.report_callback_exception=self.report_ui_error
         self.root.bind('<Configure>',self.window_moved,add='+')
         self.root.bind('<Map>',lambda event:self.root.after_idle(self.style_titlebar) if event.widget==self.root else None,add='+')
-        threading.Thread(target=self.capture_loop,daemon=True).start()
-        threading.Thread(target=self.ocr_loop,daemon=True).start()
-        threading.Thread(target=lambda:self.ocr_loop(en_only=True),daemon=True).start()
-        self.root.after(30,self.pump)
+        self.start_capture_worker()
+        self.start_ocr_workers()
+        self._pump_job=self.root.after(30,self.pump)
 
     def report_ui_error(self,error_type,value,tb):
-        self.pause()
-        self.capture_error=str(value)
-        write_local_log({'time':time.time(),'event':'ui_error','error':str(value),
-                         'traceback':''.join(traceback.format_exception(error_type,value,tb))})
-        self.events.put(f'ERROR — {value}. Details saved in LOGS.jsonl.')
+        self.handle_runtime_error('Interface',value,''.join(traceback.format_exception(error_type,value,tb)))
+
+    def handle_runtime_error(self,source,error,details=None):
+        message=f'{source}: {type(error).__name__}: {error}'
+        duplicate=self.capture_error==message
+        self.capture_error=message;self.error_source=source
+        self._preview_dirty=False
+        self.capture_stop.set();self.pause()
+        if not duplicate:
+            try:write_local_log({'time':time.time(),'event':'runtime_error','source':source,'error':str(error),'traceback':details or traceback.format_exc()})
+            except OSError:pass
+            self.events.put(f'{source} paused: {error}. Use Retry to reconnect; controls remain stopped.')
+
+    def start_capture_worker(self):
+        if self.capture_thread is not None and self.capture_thread.is_alive():return
+        self.capture_thread=threading.Thread(target=self.capture_loop,daemon=True)
+        self.capture_thread.start()
+
+    def start_ocr_workers(self):
+        for name,en_only in (('feedback',False),('en',True)):
+            worker=self.ocr_threads.get(name)
+            if worker is not None and worker.is_alive():continue
+            if en_only:self.en_ready=False
+            else:self.ocr_ready=False
+            worker=threading.Thread(target=lambda mode=en_only:self.ocr_loop(mode),daemon=True)
+            self.ocr_threads[name]=worker;worker.start()
+
+    def retry_tracking(self):
+        if self.recovering or self.closed.is_set():return
+        self.recovering=True;self.pause();self.capture_stop.set()
+        self.status.set('Reconnecting tracking. Controls are paused...')
+        self.root.after(30,self.finish_retry)
+
+    def finish_retry(self):
+        if self.closed.is_set() or not self.recovering:return
+        if self.capture_thread is not None and self.capture_thread.is_alive():
+            self.root.after(50,self.finish_retry);return
+        for name,worker in self.ocr_threads.items():
+            ready=self.en_ready if name=='en' else self.ocr_ready
+            if not ready and worker.is_alive():
+                self.root.after(50,self.finish_retry);return
+        try:
+            # Cancel old input timers and release held inputs before replacing devices.
+            self.mouse.release();self.keyboard.release()
+            self.window_capture.close()
+            self.mouse=MouseInput(self.config['click_hold_ms']);self.keyboard=KeyboardInput()
+            self.window_capture=RobloxWindowCapture(self.events)
+            for pending in (self.frames,self.ocr_frames,self.en_frames,self.results,self.en_results,self.metrics,self.deliveries):
+                while True:
+                    try:pending.get_nowait()
+                    except queue.Empty:break
+            self._last_preview=None;self._preview_rect=None;self._preview_extent=None
+            self.capture_stop.clear()
+            previous_source=self.error_source
+            self.capture_error=None;self.error_source=None
+            if previous_source=='Interface':self.set_light_mode()
+            self.keys={key:binding_down(key) for key in self.hotkeys}
+            self.start_capture_worker();self.start_ocr_workers()
+            self.status.set('Tracking reconnected. Input is paused; use your start keybind when ready.')
+            self.events.put('Tracking reconnected; controls remain paused.')
+        except Exception as exc:self.handle_runtime_error('Recovery',exc)
+        finally:self.recovering=False
 
     def build_check_styles(self,style):
         bg,card,ink,muted,accent=self.colors
@@ -967,6 +1029,8 @@ class App:
         self.update_key_hint()
         pause_button=ttk.Button(footer,text='Pause',command=self.stop_button)
         pause_button.pack(side='right')
+        self.full_retry=ttk.Button(footer,text='Retry',command=self.retry_tracking,state='disabled',style='Compact.TButton')
+        self.full_retry.pack(side='right',padx=(0,6))
         Tooltip(pause_button,'Pause controls and cancel pending mouse or key input. Live tracking continues while paused.')
         self.full_preview=self.preview
         self.build_compact_ui()
@@ -996,6 +1060,7 @@ class App:
             'Follow minigame markers':'Follow detected circles, verified key prompts, or the training bar in the preview. Framing is held briefly between targets to avoid zoom flashes.',
             'Follow markers':'Follow minigame markers in the preview without changing the area used for detection.',
             'Instructions':'Open the numbered setup instructions and tips for the selected training mode.',
+            'Retry':'Reconnect tracking and recover from an error without closing the app. Controls stay paused until you start again.',
             'Pause':'Stop macro input and release held controls. Live tracking continues.'
         }
         for widget in container.winfo_children():
@@ -1086,8 +1151,10 @@ class App:
         tk.Label(bottom,textvariable=self.status,font=('Segoe UI',9),fg=ink,bg=bg,wraplength=350,justify='left',anchor='w').pack(fill='x',pady=(8,4))
         footer=tk.Frame(bottom,bg=bg);footer.pack(fill='x')
         self.compact_footer=footer
-        tk.Label(footer,textvariable=self.key_hint,font=('Segoe UI',9,'bold'),fg=accent,bg=bg,wraplength=270,justify='left').pack(side='left')
+        tk.Label(footer,textvariable=self.key_hint,font=('Segoe UI',9,'bold'),fg=accent,bg=bg,wraplength=220,justify='left').pack(side='left')
         ttk.Button(footer,text='Pause',command=self.stop_button,style='Compact.TButton').pack(side='right')
+        self.compact_retry=ttk.Button(footer,text='Retry',command=self.retry_tracking,state='disabled',style='Compact.TButton')
+        self.compact_retry.pack(side='right',padx=(0,5))
 
     def hover_training_tab(self,event):
         try:index=self.tabs.index(f'@{event.x},{event.y}')
@@ -1543,7 +1610,9 @@ class App:
             else:self.ocr_ready=True
             self.events.put('En letter reader ready' if en_only else 'Feedback OCR ready')
         except Exception as exc:
-            self.events.put(f'OCR failed; click mode unavailable: {exc}')
+            if en_only:self.en_ready=False
+            else:self.ocr_ready=False
+            self.handle_runtime_error('Key reader' if en_only else 'Feedback reader',exc)
             return
         while not self.closed.is_set():
             try:
@@ -1567,7 +1636,10 @@ class App:
                     items=[item for item in items if item[1]>=.90]
                 self.results.put((session,stamp,parse_feedback(items),items))
             except Exception as exc:
-                self.events.put(f'OCR error: {exc}')
+                if en_only:self.en_ready=False
+                else:self.ocr_ready=False
+                self.handle_runtime_error('Key reader' if en_only else 'Feedback reader',exc)
+                return
 
     @staticmethod
     def latest(q,value):
@@ -1621,7 +1693,7 @@ class App:
         last_cancellation=None
         try:
             with mss.mss() as sct, (BASE/'LOGS.jsonl').open('a',buffering=1) as log:
-                while not self.closed.is_set():
+                while not self.closed.is_set() and not self.capture_stop.is_set():
                     if not self.config.get('game'):
                         self.closed.wait(.025)
                         continue
@@ -1629,6 +1701,7 @@ class App:
                         self.pause()
                         self.events.put('Input PAUSED: Roblox lost focus. Focus Roblox and press the start key to resume.')
                     session=self.session
+                    training=self.training
                     if self.keyboard.error:raise self.keyboard.error
                     if self.mouse.error:
                         raise self.mouse.error
@@ -1677,10 +1750,10 @@ class App:
                     last_stamp=processed_at
                     detection_scale=min(1.,960/frame.shape[1])
                     detection_frame=cv2.resize(frame,None,fx=detection_scale,fy=detection_scale,interpolation=cv2.INTER_AREA) if detection_scale<1 else frame
-                    if self.training not in BAR_MODES:
+                    if training not in BAR_MODES:
                         for activity in bar_activity.finish('tracking ended: training mode changed'):self.events.put(activity)
                         bar_activity.mode=None
-                    if self.training=='En/Ken':
+                    if training=='En/Ken':
                         now=time.perf_counter()
                         if en_session!=session:
                             en_token+=1;en_signature=None;en_sent=False;en_key=None;en_unknown=False
@@ -1756,12 +1829,12 @@ class App:
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(255,240,40),2)
                             rect=tuple(v/detection_scale for v in prompt.rect) if confirmed else None
                             label='Verified key prompt' if confirmed else 'Verifying key prompt' if prompt else 'Searching for key prompts'
-                            self.latest(self.frames,(self.training,frame,rect,label))
+                            self.latest(self.frames,(training,frame,rect,label))
                             self.metrics.put(('en',{'count':en_count,'key':en_key,'result':en_last_feedback,'tracked':confirmed,'fps':1/max(.001,frame_interval)}))
                             last_preview=now
                         self.closed.wait(.005 if self.running.is_set() else .045)
                         continue
-                    if self.training in BAR_MODES:
+                    if training in BAR_MODES:
                         if last_shu_session!=session:
                             shu.previous=None
                             shu.velocity=0.
@@ -1770,11 +1843,11 @@ class App:
                             last_shu_session=session
                         bar=detect_shu(detection_frame)
                         now=time.perf_counter()
-                        control=self.control_preferences[self.training]
+                        control=self.control_preferences[training]
                         active=self.running.is_set()
-                        is_ko=self.training=='Ko/RyuS/RyuD'
+                        is_ko=training=='Ko/RyuS/RyuD'
                         holding=ko.update(bar,now,active) if is_ko else shu.update(bar,now)
-                        def hold_allowed(sid=session,mode=self.training,selected=control):
+                        def hold_allowed(sid=session,mode=training,selected=control):
                             return (self.running.is_set() and not self.closed.is_set() and self.session==sid
                                     and self.training==mode and foreground_is_roblox()
                                     and not any(binding_down(binding) for binding in self.hotkeys)
@@ -1786,7 +1859,7 @@ class App:
                         else:
                             self.keyboard.set_hold(False)
                             self.mouse.set_hold(pressed,guard=hold_allowed)
-                        for activity in bar_activity.update(self.training,bar is not None,now,
+                        for activity in bar_activity.update(training,bar is not None,now,
                                                             ko.attempts if is_ko else shu.cycles,
                                                             active,time.time()):
                             self.events.put(activity)
@@ -1799,10 +1872,10 @@ class App:
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(40,200,245),2)
                                 cv2.line(frame,(marker,y0-3),(marker,y1+3),(255,240,40),2)
                             rect=(bar.left/detection_scale,(bar.top-14)/detection_scale,bar.right/detection_scale,(bar.bottom+44)/detection_scale) if bar else None
-                            self.latest(self.frames,(self.training,frame,rect,'Bar and indicator' if bar else 'Searching for the training bar'))
+                            self.latest(self.frames,(training,frame,rect,'Bar and indicator' if bar else 'Searching for the training bar'))
                             held=self.keyboard.pressed==0x20 if control=='Space' else self.mouse.pressed
                             action='Paused' if not active else ('Space held' if control=='Space' else 'Left held') if held else 'Released'
-                            self.metrics.put(('shu',{'mode':self.training,'phase':ko.phase if is_ko else None,'focus':bar.focus if bar else None,'cycles':ko.attempts if is_ko else shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
+                            self.metrics.put(('shu',{'mode':training,'phase':ko.phase if is_ko else None,'focus':bar.focus if bar else None,'cycles':ko.attempts if is_ko else shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
                             last_preview=now
                         self.closed.wait(.003 if self.running.is_set() else .045)
                         continue
@@ -1963,27 +2036,21 @@ class App:
                             radius=max(target.radius*3.6,target.ring or 0,48)/detection_scale
                             cx,cy=target.x/detection_scale,target.y/detection_scale
                             rect=(cx-radius,cy-radius,cx+radius,cy+radius)
-                        self.latest(self.frames,(self.training,frame,rect,'Circle and shrinking ring' if target else 'Searching for training circles'))
+                        self.latest(self.frames,(training,frame,rect,'Circle and shrinking ring' if target else 'Searching for training circles'))
                         self.metrics.put(('scan',(len(tracks),1/max(.001,frame_interval))))
                         self.metrics.put(('color',(detector.color_status,detector.color_hex)))
                         last_preview=now
                     self.closed.wait(.002 if self.running.is_set() else .045)
         except Exception as exc:
-            self.capture_error=str(exc)
-            self.pause()
-            self.events.put(f'ERROR — capture stopped: {exc}. Restart the app after correcting the problem.')
-            try:
-                with (BASE/'LOGS.jsonl').open('a') as error_log:
-                    error_log.write(json.dumps({'time':time.time(),'event':'capture_error','error':str(exc)})+'\n')
-            except OSError:
-                pass
+            if not self.closed.is_set() and not self.capture_stop.is_set():self.handle_runtime_error('Capture',exc)
         finally:
             for activity in bar_activity.finish('tracking stopped'):self.events.put(activity)
 
     def toggle(self):
+        if self.recovering:
+            self.status.set('Reconnecting tracking. Input stays paused...');return
         if self.capture_error:
-            self.status.set('ERROR: '+self.capture_error+'. Restart the macro after correcting this.')
-            return
+            self.retry_tracking();return
         if self.running.is_set():
             self.pause()
             self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
@@ -2028,6 +2095,15 @@ class App:
             log.see('end');log.configure(state='disabled')
 
     def pump(self):
+        if self._pump_job is not None:
+            self.root.after_cancel(self._pump_job);self._pump_job=None
+        if self.closed.is_set():return
+        try:self.pump_once()
+        except Exception as exc:self.report_ui_error(type(exc),exc,exc.__traceback__)
+        finally:
+            if not self.closed.is_set():self._pump_job=self.root.after(30,self.pump)
+
+    def pump_once(self):
         if self.root.state()=='normal':
             self.panel_bounds=(self.root.winfo_rootx()-8,self.root.winfo_rooty()-32,self.root.winfo_width()+16,self.root.winfo_height()+40)
         else:
@@ -2117,11 +2193,13 @@ class App:
         self.badge.configure(text=f'  {mode_name} | '+('RUNNING  ' if active else 'PAUSED  '),fg=self.colors[4] if active else self.colors[3])
         if self.capture_error:
             self.badge.configure(text='  ERROR | INPUT STOPPED  ',fg='#ffaf8a')
-            self.status.set('ERROR: '+self.capture_error+'. Restart the macro after correcting this.')
+            if not self.recovering:self.status.set(self.capture_error+' — use Retry to reconnect.')
             self.scan_info.set('Stopped — see Activity')
         if not active and self.status.get().startswith('Running'):
             self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
         self.sync_compact_data()
+        for button in (self.full_retry,self.compact_retry):button.state(['!disabled'] if self.capture_error and not self.recovering else ['disabled'])
+        if self.recovering:self.compact_badge.configure(text='RECONNECTING',fg=self.colors[4])
         while True:
             try:
                 event=self.events.get_nowait()
@@ -2136,7 +2214,6 @@ class App:
             self.compact_log.configure(state='normal')
             self.compact_log.insert('end',time.strftime('%H:%M:%S ')+event+'\n')
             self.compact_log.see('end');self.compact_log.configure(state='disabled')
-        self.root.after(20,self.pump)
 
     def close(self):
         self.close_training_menu()
@@ -2145,7 +2222,8 @@ class App:
         self._position_restoring=False
         self.remember_window_position()
         self.pause()
-        self.closed.set()
+        self.closed.set();self.capture_stop.set()
+        if self._pump_job is not None:self.root.after_cancel(self._pump_job);self._pump_job=None
         self.window_capture.close()
         self.root.destroy()
 
