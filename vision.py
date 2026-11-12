@@ -449,3 +449,81 @@ class KoController:
             return False
         self.holding=True;self.phase='Moving'
         return True
+
+
+def crop_preview(frame,rect):
+    """Crop only the display image; detector/input coordinates remain unchanged."""
+    height,width=frame.shape[:2]
+    x0,y0,x1,y1=map(float,rect)
+    margin_x=max(12,(x1-x0)*.08);margin_y=max(12,(y1-y0)*.12)
+    x0=max(0,int(np.floor(x0-margin_x)));y0=max(0,int(np.floor(y0-margin_y)))
+    x1=min(width,int(np.ceil(x1+margin_x)));y1=min(height,int(np.ceil(y1+margin_y)))
+    return frame[y0:y1,x0:x1] if x1>x0 and y1>y0 else frame
+
+
+def stable_preview_crop(frame,rect):
+    """Keep a fixed display scale, including targets near the capture edges."""
+    height,width=frame.shape[:2]
+    x0,y0,x1,y1=map(float,rect)
+    side=max(1,min(2048,round(max(x1-x0,y1-y0))))
+    left=round((x0+x1-side)/2);top=round((y0+y1-side)/2)
+    if width>=side:left=max(0,min(width-side,left))
+    if height>=side:top=max(0,min(height-side,top))
+    result=np.zeros((side,side)+frame.shape[2:],dtype=frame.dtype)
+    sx0,sy0=max(0,left),max(0,top);sx1,sy1=min(width,left+side),min(height,top+side)
+    if sx1>sx0 and sy1>sy0:
+        result[sy0-top:sy1-top,sx0-left:sx1-left]=frame[sy0:sy1,sx0:sx1]
+    return result
+
+
+class BarActivityTracker:
+    """Summarize repeated appearances; tolerate normal gaps without log spam."""
+    def __init__(self,absence_seconds=7.):
+        self.absence_seconds=absence_seconds
+        self.mode=None;self.series=0;self.active=False;self.visible=False
+        self.last_seen=0.;self.started_waiting=0.;self.reported_absence=False
+        self.appearances=0;self.completed=0;self.previous_total=0;self.started_at=0.
+
+    def event(self,phase,reason=None):
+        count_label='zone releases' if self.mode=='Ko/RyuS/RyuD' else 'completed rounds'
+        details=f'bar appearances: {self.appearances} | {count_label}: {self.completed}'
+        text=f'{self.mode} training detected | {details}'
+        if reason:text=f'{self.mode} {reason} | {details}'
+        return {'type':'bar_activity','key':self.series,'phase':phase,'time':self.started_at,
+                'mode':self.mode,'appearances':self.appearances,'completed':self.completed,'text':text}
+
+    def finish(self,reason='tracking ended'):
+        if not self.active:return []
+        self.active=False;self.visible=False
+        return [self.event('ended',reason)]
+
+    def update(self,mode,present,now,total,enabled=False,wall_time=0.):
+        events=[]
+        if mode!=self.mode:
+            events.extend(self.finish('tracking ended: training mode changed'))
+            self.mode=mode;self.previous_total=total;self.started_waiting=now
+            self.reported_absence=False
+        delta=max(0,total-self.previous_total);self.previous_total=total
+        if present:
+            self.reported_absence=False
+            if not self.active:
+                self.series+=1;self.active=True;self.appearances=1;self.completed=0
+                self.started_at=wall_time
+                events.append(self.event('started'))
+            else:
+                changed=False
+                if not self.visible and now-self.last_seen>.18:
+                    self.appearances+=1;changed=True
+                if delta:self.completed+=delta;changed=True
+                if changed:events.append(self.event('updated'))
+            self.last_seen=now;self.visible=True
+        else:
+            self.visible=False
+            if self.active and now-self.last_seen>=self.absence_seconds:
+                events.extend(self.finish(f'training interrupted: no minigame detected for {self.absence_seconds:g}s; input released'))
+                self.reported_absence=True
+            elif enabled and not self.active and not self.reported_absence and now-self.started_waiting>=self.absence_seconds:
+                self.series+=1;self.started_at=wall_time;self.appearances=0;self.completed=0
+                events.append(self.event('ended',f'training not visible: no minigame detected for {self.absence_seconds:g}s; check the game and capture area'))
+                self.reported_absence=True
+        return events

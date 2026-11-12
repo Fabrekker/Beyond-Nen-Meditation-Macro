@@ -25,8 +25,8 @@ except ImportError:
     except ImportError:
         pass
 import numpy as np
-from PIL import Image, ImageTk
-from vision import Detector, Tuner, parse_feedback, feedback_search_rect, detect_shu, ShuController, KoController, detect_en_prompt, recognize_en
+from PIL import Image, ImageTk, ImageDraw
+from vision import Detector, Tuner, parse_feedback, feedback_search_rect, detect_shu, ShuController, KoController, detect_en_prompt, recognize_en, crop_preview, stable_preview_crop, BarActivityTracker
 from wininput import MouseInput, KeyboardInput
 
 LOG_LOCK=threading.RLock()
@@ -41,7 +41,10 @@ def write_local_log(record):
 class ActivityQueue(queue.Queue):
     def put(self,value,*args,**kwargs):
         try:
-            write_local_log({'time':time.time(),'event':'activity','message':str(value)})
+            if isinstance(value,dict) and value.get('type')=='bar_activity':
+                if value['phase'] in ('started','ended'):
+                    write_local_log({**value,'started_at':value['time'],'time':time.time(),'event':'bar_training_summary'})
+            else:write_local_log({'time':time.time(),'event':'activity','message':str(value)})
         except OSError:
             pass
         return super().put(value,*args,**kwargs)
@@ -487,6 +490,27 @@ class RobloxWindowCapture:
 TRAINING_MODES=('Ren/Ten','Shu/Gyo/Zetsu','En/Ken','Ko/RyuS/RyuD')
 BAR_MODES=('Shu/Gyo/Zetsu','Ko/RyuS/RyuD')
 
+
+def training_instructions(mode):
+    behavior={
+        'Ren/Ten':'The macro moves your mouse between circles and times clicks to the shrinking rings.',
+        'Shu/Gyo/Zetsu':'The macro holds and releases your selected input to keep the indicator in the zone until focus fills.',
+        'En/Ken':'The macro reads each letter prompt and presses the matching key.',
+        'Ko/RyuS/RyuD':'The macro holds your selected input and releases it in the gold zone to finish each attempt.'
+    }[mode]
+    visibility=('Set Roblox graphics to Manual, quality 1: meditation aura and other effects can interfere with circle detection. Aim at a clearer area and keep the mouse free.' if mode=='Ren/Ten'
+                else 'Keep the top-right area clear and the minigame visible.')
+    start='Open the Roblox menu, press your configured start keybind, then close the menu to return to training.'
+    steps=[
+        'Start the matching training in Roblox. Choose Select minigame area or Full screen in Settings.',
+        visibility if mode=='Ren/Ten' else start,
+        start+' Let the macro handle the minigame.' if mode=='Ren/Ten' else visibility+' Let the macro handle the minigame.'
+    ]
+    if mode in BAR_MODES:steps=steps[:2]
+    return (f'{mode}\n{behavior}\n\n'+
+            '\n\n'.join(f'{index}. {text}' for index,text in enumerate(steps,1))+
+            '\n\nTip: Use your configured pause keybind to stop controls before interacting yourself.')
+
 KEY_CODES={**{f'F{i}':0x6f+i for i in range(1,25)},**{c:ord(c) for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'},
            **{f'Numpad{i}':0x60+i for i in range(10)},
            'Space':0x20,'Home':0x24,'End':0x23,'Insert':0x2d,'Delete':0x2e,'Pause':0x13,
@@ -514,6 +538,7 @@ def binding_down(codes):
 class Tooltip:
     def __init__(self,widget,text):
         self.widget,self.text,self.job,self.window=widget,text,None,None
+        widget._macro_tooltip=self
         widget.bind('<Enter>',self.enter,add='+')
         widget.bind('<Leave>',self.hide,add='+')
         widget.bind('<ButtonPress>',self.hide,add='+')
@@ -523,10 +548,14 @@ class Tooltip:
         self.job=self.widget.after(450,self.show)
     def show(self):
         self.job=None
+        text=self.text() if callable(self.text) else self.text
+        if not text:return
         self.window=tk.Toplevel(self.widget)
         self.window.overrideredirect(True)
         self.window.attributes('-topmost',True)
-        tk.Label(self.window,text=self.text,wraplength=320,justify='left',bg='#28364b',fg='#eef3fa',
+        palette=getattr(self.widget.winfo_toplevel(),'ui_colors',('#10151f','#1a2230','#eef3fa','#98a7bc','#63e5bf'))
+        self.window.ui_colors=palette
+        tk.Label(self.window,text=text,wraplength=320,justify='left',bg=palette[1],fg=palette[2],
                  font=('Segoe UI',10),padx=12,pady=9).pack()
         self.window.update_idletasks()
         x=min(self.widget.winfo_pointerx()+12,self.widget.winfo_screenwidth()-self.window.winfo_width()-8)
@@ -541,6 +570,104 @@ class Tooltip:
             self.window=None
 
 
+class ThemedChoice(ttk.Button):
+    """Arrow-free choice button with a themed, scrollable keyboard-accessible list."""
+    def __init__(self,master,values=(),textvariable=None,state='readonly',**options):
+        self.values=tuple(map(str,values))
+        self.popup=None
+        self.variable=textvariable if textvariable is not None else tk.StringVar(master=master)
+        super().__init__(master,textvariable=self.variable,command=self.open,cursor='hand2',
+                         style='Compact.TButton',state='disabled' if state=='disabled' else 'normal',**options)
+        self.bind('<Down>',self.open_key)
+        self.bind('<Return>',self.open_key)
+        self.bind('<Destroy>',lambda event:self.close() if event.widget==self else None,add='+')
+
+    def configure(self,cnf=None,**options):
+        if cnf is not None and not isinstance(cnf,dict):return super().configure(cnf,**options)
+        options={**(cnf or {}),**options}
+        if 'values' in options:self.values=tuple(map(str,options.pop('values')))
+        if options.get('state')=='readonly':options['state']='normal'
+        return super().configure(**options)
+
+    config=configure
+
+    def get(self):
+        return str(self.getvar(self.cget('textvariable')))
+
+    def set(self,value):
+        self.setvar(self.cget('textvariable'),value)
+
+    def open_key(self,event=None):
+        self.open();return 'break'
+
+    def close(self):
+        popup=self.popup;self.popup=None
+        if popup is not None:
+            try:popup.grab_release();popup.destroy()
+            except tk.TclError:pass
+
+    def choose(self,event=None):
+        if self.popup is None:return 'break'
+        selected=self.listbox.curselection()
+        if not selected:return 'break'
+        value=self.values[selected[0]];changed=value!=self.get()
+        self.set(value);self.close();self.focus_set()
+        if changed:self.event_generate('<<ComboboxSelected>>',when='tail')
+        return 'break'
+
+    def open(self):
+        if self.instate(['disabled']):return
+        if self.popup is not None:self.close();return
+        bg,card,ink,muted,accent=getattr(self.winfo_toplevel(),'ui_colors',('#10151f','#1a2230','#eef3fa','#98a7bc','#63e5bf'))
+        popup=tk.Toplevel(self);self.popup=popup
+        popup.withdraw();popup.overrideredirect(True);popup.transient(self.winfo_toplevel())
+        popup.attributes('-topmost',True);popup.configure(bg=card);popup.ui_colors=(bg,card,ink,muted,accent)
+        self.listbox=tk.Listbox(popup,height=min(9,max(1,len(self.values))),width=max(12,min(24,max(map(len,self.values),default=12))),
+                               bg=card,fg=ink,selectbackground=bg,selectforeground=accent,activestyle='none',
+                               highlightthickness=1,highlightbackground=muted,highlightcolor=accent,
+                               borderwidth=0,font=('Segoe UI',10),exportselection=False,selectmode='browse')
+        self.listbox.pack(side='left',fill='both',expand=True)
+        if len(self.values)>9:
+            scroll=ttk.Scrollbar(popup,command=self.listbox.yview);scroll.pack(side='right',fill='y')
+            self.listbox.configure(yscrollcommand=scroll.set)
+        for value in self.values:self.listbox.insert('end',value)
+        index=self.values.index(self.get()) if self.get() in self.values else 0
+        if self.values:self.listbox.selection_set(index);self.listbox.activate(index);self.listbox.see(index)
+        self.listbox.bind('<ButtonRelease-1>',self.choose)
+        self.listbox.bind('<Return>',self.choose)
+        self.listbox.bind('<space>',self.choose)
+        def hover(event):
+            if not self.values:return
+            index=self.listbox.nearest(event.y)
+            self.listbox.selection_clear(0,'end');self.listbox.selection_set(index);self.listbox.activate(index)
+        self.listbox.bind('<Motion>',hover)
+        def check_focus():
+            if self.popup is not popup:return
+            focused=self.focus_get()
+            if focused is None or not str(focused).startswith(str(popup)):self.close()
+        self.listbox.bind('<FocusOut>',lambda event:self.after_idle(check_focus))
+
+        popup.bind('<Escape>',lambda event:self.close())
+        def leave(event,previous=False):
+            self.close()
+            (self.tk_focusPrev() if previous else self.tk_focusNext()).focus_set()
+            return 'break'
+        self.listbox.bind('<Tab>',leave)
+        self.listbox.bind('<Shift-Tab>',lambda event:leave(event,True))
+        popup.update_idletasks()
+        width=max(self.winfo_width(),popup.winfo_reqwidth())
+        height=popup.winfo_reqheight()
+        x=max(0,min(self.winfo_rootx(),self.winfo_screenwidth()-width-8))
+        y=self.winfo_rooty()+self.winfo_height()
+        if y+height>self.winfo_screenheight():y=self.winfo_rooty()-height
+        popup.geometry(f'{width}x{height}+{x}+{max(0,y)}')
+        def dismiss(event):
+            if not (popup.winfo_rootx()<=event.x_root<popup.winfo_rootx()+popup.winfo_width() and
+                    popup.winfo_rooty()<=event.y_root<popup.winfo_rooty()+popup.winfo_height()):self.close()
+        popup.bind('<ButtonPress-1>',dismiss,add='+')
+        popup.deiconify();popup.lift();popup.grab_set();self.listbox.focus_set()
+
+
 class App:
     def __init__(self):
         migrate_logs()
@@ -553,7 +680,7 @@ class App:
         self.root.iconphoto(True,self.app_icon)
         self.root.title('Beyond Nen | Training Assistant')
         self.root.geometry('790x950')
-        self.root.minsize(710,920)
+        self.root.minsize(360,520)
         self.running = threading.Event()
         self.closed = threading.Event()
         self.frames = queue.Queue(maxsize=1)
@@ -573,6 +700,30 @@ class App:
         self.config['click_hold_ms']=min(25,max(15,float(self.config['click_hold_ms'])))
         self.config.setdefault('start_key','F1')
         self.config.setdefault('pause_key','F2')
+        self.config.setdefault('compact_view',True)
+        try:view_version=json.loads((BASE/'version.json').read_text(encoding='utf-8'))['version']
+        except (OSError,ValueError,KeyError):view_version='local'
+        if self.config.get('view_default_version')!=view_version:
+            self.config.update(compact_view=True,view_default_version=view_version)
+            self.save()
+        self.config.setdefault('always_on_top',False)
+        self.config.setdefault('light_mode',False)
+        self.config.setdefault('focus_preview',True)
+        self.compact_var=tk.BooleanVar(value=self.config['compact_view'])
+        self.topmost_var=tk.BooleanVar(value=self.config['always_on_top'])
+        self.light_var=tk.BooleanVar(value=self.config['light_mode'])
+        self.focus_var=tk.BooleanVar(value=self.config['focus_preview'])
+        self.mode_var=tk.StringVar()
+        self.instructions_text=tk.StringVar()
+        self.training_popup=None
+        self._tab_hover=None
+        self.focus_info=tk.StringVar(value='Searching for minigame markers')
+        self._last_preview=None
+        self._preview_rect=None
+        self._preview_extent=None
+        self._preview_mode=None
+        self._preview_rect_at=0.
+        self._preview_dirty=False
         if self.config.get('cursor_motion_revision')!=1:
             self.config.update(cursor_motion_revision=1,lead_ms=12.)
             self.save()
@@ -594,7 +745,7 @@ class App:
             configured=((KEY_CODES['F1'],),(KEY_CODES['F2'],))
         self.hotkeys=configured
         self.mouse=MouseInput(self.config['click_hold_ms'])
-        self.status = tk.StringVar(value=f"Paused. Select a game area or full screen, then press {self.config['start_key']} in Roblox.")
+        self.status = tk.StringVar(value=f"Paused. Select the minigame area or full screen, then press {self.config['start_key']} in Roblox.")
         self.auto_feedback=tk.BooleanVar(value=self.config['auto_feedback'])
         self.feedback_info=tk.StringVar(value='Automatic feedback: waiting for a result')
         self.keys = {binding:binding_down(binding) for binding in self.hotkeys}
@@ -612,9 +763,14 @@ class App:
         self.color_info=tk.StringVar(value='Checking colors…')
         self.panel_bounds=None
         self.live_tracks=()
+        self._position_job=None
+        self._position_restore_job=None
+        self._position_restoring=False
         self.build_ui()
         self.root.protocol('WM_DELETE_WINDOW',self.close)
         self.root.report_callback_exception=self.report_ui_error
+        self.root.bind('<Configure>',self.window_moved,add='+')
+        self.root.bind('<Map>',lambda event:self.root.after_idle(self.style_titlebar) if event.widget==self.root else None,add='+')
         threading.Thread(target=self.capture_loop,daemon=True).start()
         threading.Thread(target=self.ocr_loop,daemon=True).start()
         threading.Thread(target=lambda:self.ocr_loop(en_only=True),daemon=True).start()
@@ -627,58 +783,108 @@ class App:
                          'traceback':''.join(traceback.format_exception(error_type,value,tb))})
         self.events.put(f'ERROR — {value}. Details saved in LOGS.jsonl.')
 
+    def build_check_styles(self,style):
+        bg,card,ink,muted,accent=self.colors
+        light=self.light_var.get()
+        self._indicator_revision=getattr(self,'_indicator_revision',0)+1
+        self.check_images={}
+        def image(selected=False,focused=False,disabled=False):
+            scale=4
+            canvas=Image.new('RGBA',(36*scale,22*scale),(0,0,0,0))
+            draw=ImageDraw.Draw(canvas)
+            track=('#c3ccd7' if light else '#35465f') if not selected or disabled else accent
+            thumb=('#ffffff' if light else '#eef3fa') if not disabled else muted
+            if focused:
+                draw.rounded_rectangle((0,scale,36*scale-1,21*scale),radius=10*scale,outline=accent,width=scale)
+            draw.rounded_rectangle((2*scale,3*scale,34*scale,19*scale),radius=8*scale,fill=track)
+            tx=24 if selected else 12
+            draw.ellipse(((tx-5)*scale,6*scale,(tx+5)*scale,16*scale),fill=thumb)
+            return ImageTk.PhotoImage(canvas.resize((36,22),Image.Resampling.LANCZOS),master=self.root)
+        for name,selected,focused,disabled in [('off',False,False,False),('on',True,False,False),('focus_off',False,True,False),('focus_on',True,True,False),('disabled_off',False,False,True),('disabled_on',True,False,True)]:
+            self.check_images[name]=image(selected,focused,disabled)
+        element=f'MacroCheck{self._indicator_revision}_{id(self)}.indicator'
+        imgs=self.check_images
+        style.element_create(element,'image',imgs['off'],
+                             ('disabled','selected',imgs['disabled_on']),('disabled',imgs['disabled_off']),
+                             ('selected','focus',imgs['focus_on']),('focus',imgs['focus_off']),('selected',imgs['on']))
+        layout=[('Checkbutton.padding',{'sticky':'nswe','children':[
+                    (element,{'side':'left','sticky':''}),('Checkbutton.label',{'side':'left','sticky':'w'})]})]
+        for name in ('TCheckbutton','Compact.TCheckbutton'):
+            style.layout(name,layout)
+            style.map(name,foreground=[('disabled',muted)])
+
     def build_ui(self):
-        bg,card,ink,muted,accent='#10151f','#1a2230','#eef3fa','#98a7bc','#63e5bf'
+        light=self.config.get('light_mode',False)
+        bg,card,ink,muted,accent=('#edf2f7','#ffffff','#182535','#52647a','#08765f') if light else ('#10151f','#1a2230','#eef3fa','#98a7bc','#63e5bf')
         self.colors=(bg,card,ink,muted,accent)
+        self.root.ui_colors=self.colors
+        self.root.option_add('*TCombobox*Listbox.background',card)
+        self.root.option_add('*TCombobox*Listbox.foreground',ink)
+        self.root.option_add('*TCombobox*Listbox.selectBackground','#dce5ef' if light else '#29364a')
+        self.root.option_add('*TCombobox*Listbox.selectForeground',accent)
         self.root.configure(bg=bg)
         style=ttk.Style(self.root)
         style.theme_use('clam')
-        style.configure('TButton',font=('Segoe UI',10),padding=(14,9),background='#29364a',foreground=ink,borderwidth=0)
-        style.map('TButton',background=[('active','#35465f')])
+        style.configure('TButton',font=('Segoe UI',10),padding=(12,6),background='#dce5ef' if light else '#29364a',foreground=ink,borderwidth=0)
+        style.map('TButton',background=[('active','#cbd8e7' if light else '#35465f')])
+        style.configure('TCombobox',fieldbackground=card,foreground=ink,background=card,arrowsize=13)
+        style.map('TCombobox',fieldbackground=[('readonly',card)],foreground=[('readonly',ink)])
+        style.configure('Vertical.TScrollbar',background=card,troughcolor=bg,arrowcolor=muted,bordercolor=bg,lightcolor=card,darkcolor=card,arrowsize=10)
+        style.map('Vertical.TScrollbar',background=[('active','#dce5ef' if light else '#29364a')])
+        style.configure('Compact.TButton',font=('Segoe UI',9),padding=(8,5))
+        style.configure('Compact.TCheckbutton',font=('Segoe UI',9),background=bg,foreground=ink,padding=2)
+        style.map('Compact.TCheckbutton',background=[('active',bg)])
+        style.configure('Compact.TNotebook.Tab',font=('Segoe UI',9,'bold'),padding=(10,6),background=card,foreground=muted,bordercolor=bg,lightcolor=bg,darkcolor=bg,focuscolor=card)
+        style.map('Compact.TNotebook.Tab',background=[('selected',card)],foreground=[('selected',accent)],padding=[('selected',(10,6)),('!selected',(10,6))])
         style.configure('TCheckbutton',font=('Segoe UI',10),background=card,foreground=ink,padding=4)
         style.map('TCheckbutton',background=[('active',card)],indicatorcolor=[('selected',accent),('!selected','#35465f')])
+        self.build_check_styles(style)
         outer=tk.Frame(self.root,bg=bg)
-        outer.pack(fill='both',expand=True,padx=24,pady=16)
+        self.full_view=outer
+        outer.pack(fill='both',expand=True,padx=24,pady=12)
         header=tk.Frame(outer,bg=bg)
         header.pack(fill='x')
-        tk.Label(header,text='BEYOND NEN',font=('Segoe UI',22,'bold'),fg=ink,bg=bg).pack(side='left')
+        tk.Label(header,text='Beyond Nen | Training Assistant',font=('Segoe UI',18,'bold'),fg=ink,bg=bg).pack(side='left')
         self.badge=tk.Label(header,text='  PAUSED  ',font=('Segoe UI',9,'bold'),fg=muted,bg=card,padx=8,pady=7)
         self.badge.pack(side='right')
-        tk.Label(outer,text='Training Assistant',font=('Segoe UI',10),fg=muted,bg=bg).pack(anchor='w',pady=(2,10))
-        style.configure('TNotebook',background=bg,borderwidth=0)
-        style.configure('TNotebook.Tab',font=('Segoe UI',11,'bold'),padding=(20,8),background=card,foreground=ink)
-        style.map('TNotebook.Tab',background=[('selected','#29364a')],foreground=[('selected',accent)],
+        tk.Label(outer,text='Training Assistant',font=('Segoe UI',10),fg=muted,bg=bg).pack(anchor='w',pady=(2,6))
+        toolbar=tk.Frame(outer,bg=bg);toolbar.pack(fill='x',pady=(0,5))
+        ttk.Button(toolbar,text='Compact view',command=lambda:self.set_view(True),style='Compact.TButton').pack(side='left')
+        ttk.Button(toolbar,text='Dark mode' if light else 'Light mode',command=self.toggle_theme,style='Compact.TButton').pack(side='left',padx=6)
+        ttk.Checkbutton(toolbar,text='Always on top',variable=self.topmost_var,command=self.set_topmost,style='Compact.TCheckbutton').pack(side='left',padx=(6,0))
+        style.configure('TNotebook',background=bg,borderwidth=0,bordercolor=bg,lightcolor=bg,darkcolor=bg)
+        style.configure('TNotebook.Tab',font=('Segoe UI',11,'bold'),padding=(20,8),background=card,foreground=ink,bordercolor=bg,lightcolor=bg,darkcolor=bg,focuscolor=card)
+        style.map('TNotebook.Tab',background=[('selected','#dce5ef' if light else '#29364a')],foreground=[('selected',accent)],
                   padding=[('selected',(20,8)),('!selected',(20,8))],
                   expand=[('selected',(0,0,0,0)),('!selected',(0,0,0,0))])
+        full_bottom=tk.Frame(outer,bg=bg);full_bottom.pack(side='bottom',fill='x')
+        self.full_bottom=full_bottom
         self.tabs=ttk.Notebook(outer)
-        self.tabs.pack(fill='x',pady=(0,10))
+        self.tabs.pack(fill='x',pady=(0,6))
         self.menu_hint=tk.StringVar()
-        for name,description in (('Ren/Ten','To get the mouse to exit movement, simply stop the macro with your keybind.'),('Shu/Gyo/Zetsu','The macro holds and releases the selected input to keep the indicator inside the target zone.'),('En/Ken','The macro reads each letter prompt and presses the matching key before the timer runs out.'),('Ko/RyuS/RyuD','The macro holds the selected input and releases it in the gold zone to finish each attempt.')):
+        for name,description in (('Ren/Ten','This macro detects the training circles, moves your mouse to each one, and times its clicks as the shrinking ring reaches the circle.'),('Shu/Gyo/Zetsu','The macro holds and releases the selected input to keep the indicator inside the target zone.'),('En/Ken','The macro reads each letter prompt and presses the matching key before the timer runs out.'),('Ko/RyuS/RyuD','The macro holds the selected input and releases it in the gold zone to finish each attempt.')):
             panel=tk.Frame(self.tabs,bg=card)
-            tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,padx=12,pady=8).pack(anchor='w')
-            if name in BAR_MODES:
-                row=tk.Frame(panel,bg=card);row.pack(anchor='w',padx=12,pady=(0,4))
-                tk.Label(row,text='Control input',font=('Segoe UI',9),fg=muted,bg=card).pack(side='left',padx=(0,8))
-                choice=ttk.Combobox(row,textvariable=self.control_vars[name],values=('Left click','Space'),state='readonly',width=12)
-                choice.pack(side='left')
-                choice.bind('<<ComboboxSelected>>',lambda event,mode=name:self.set_bar_input(mode))
-                Tooltip(choice,'Choose which input the macro holds. Changing this pauses the macro and releases input.')
+            tk.Label(panel,text=description,font=('Segoe UI',9),bg=card,fg=muted,wraplength=680,justify='left',anchor='w',padx=12,pady=4).pack(fill='x')
             if name=='Ren/Ten':
+                tk.Label(panel,text='Ren/Ten controls your mouse while running. To get the mouse to exit movement, simply stop the macro with your keybind.',
+                         font=('Segoe UI',9),bg=card,fg=muted,wraplength=680,justify='left',anchor='w',padx=12).pack(fill='x',pady=(0,2))
                 tk.Label(panel,text='Meditation aura and other effects can interfere with circle detection. Aim your camera at a clearer area and set Roblox graphics to Manual, quality 1.',
-                         font=('Segoe UI',9),bg=card,fg='#e7c779',wraplength=680,justify='left',padx=12,pady=6).pack(anchor='w',fill='x')
+                         font=('Segoe UI',9),bg=card,fg='#8a6214' if light else '#e7c779',wraplength=680,justify='left',padx=12,pady=3).pack(anchor='w',fill='x')
             tk.Label(panel,text='Press Tab in Roblox to clear the top-right area for the best visibility.',
-                     font=('Segoe UI',8),bg=card,fg=muted,padx=12,pady=4).pack(anchor='w')
-            tk.Label(panel,textvariable=self.menu_hint,font=('Segoe UI',9),fg=accent,bg=card,
-                     wraplength=680,justify='left',anchor='w',padx=12,pady=6).pack(fill='x')
+                     font=('Segoe UI',8),bg=card,fg=muted,padx=12,pady=2).pack(anchor='w')
+            tk.Label(panel,text='To start the macro without getting kicked from the meditation:',
+                     font=('Segoe UI',9,'bold'),fg=accent,bg=card,anchor='w',padx=12).pack(fill='x',pady=(4,1))
+            tk.Label(panel,textvariable=self.menu_hint,font=('Segoe UI',9),fg=muted,bg=card,
+                     wraplength=680,justify='left',anchor='w',padx=12).pack(fill='x',pady=(0,5))
             self.tabs.add(panel,text=name)
         self.tabs.select(TRAINING_MODES.index(self.training))
-        setup=tk.Frame(outer,bg=card,padx=16,pady=14)
+        setup=tk.Frame(outer,bg=card,padx=16,pady=10)
         setup.pack(fill='x')
         tk.Label(setup,text='CAPTURE AREAS',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(anchor='w')
         row=tk.Frame(setup,bg=card)
-        row.pack(fill='x',pady=(10,7))
+        row.pack(fill='x',pady=(7,5))
         for title,command,help_text in (
-            ('Select game',lambda:self.select('game'),'Drag a rectangle around Roblox. Only this area is scanned for targets.'),
+            ('Select minigame area',lambda:self.select('game'),'Drag a rectangle around Roblox. Only this area is scanned for targets.'),
             ('Use full screen',self.use_full_screen,'Scan your entire primary display. Keep Roblox on that display; the start key is still required to enable clicks.'),
             ('Select feedback',lambda:self.select('feedback'),'Feedback means the MISS or signed decimal result after a click. Select that text area manually if automatic reading fails. This switches to manual feedback.')):
             button=ttk.Button(row,text=title,command=command)
@@ -696,23 +902,29 @@ class App:
         bindings.pack(fill='x',pady=(0,5))
         for title,variable in (('Start / pause',self.start_key),('Pause',self.pause_key)):
             tk.Label(bindings,text=title,font=('Segoe UI',9),fg=muted,bg=card).pack(side='left',padx=(0,5))
-            choice=ttk.Combobox(bindings,textvariable=variable,values=tuple(KEY_CODES),state='readonly',width=8)
+            choice=ThemedChoice(bindings,textvariable=variable,values=tuple(KEY_CODES),state='readonly',width=8)
             choice.pack(side='left',padx=(0,4))
             choice.bind('<<ComboboxSelected>>',self.set_keybinds)
             Tooltip(choice,'Choose a preset key, or use Record to detect your own key combination. Changing a binding pauses the macro.')
             record=ttk.Button(bindings,text='Record',command=lambda v=variable:self.record_keybind(v))
             record.pack(side='left',padx=(0,14))
             Tooltip(record,'Press your desired keyboard key, with optional Ctrl, Alt, Shift or Win modifiers. Click Cancel to leave the binding unchanged.')
+        self.bar_input_row=tk.Frame(bindings,bg=card)
+        tk.Label(self.bar_input_row,text='Control input',font=('Segoe UI',9),fg=muted,bg=card).pack(side='left',padx=(0,5))
+        self.bar_input_choice=ThemedChoice(self.bar_input_row,values=('Left click','Space'),state='readonly',width=10)
+        self.bar_input_choice.pack(side='left')
+        self.bar_input_choice.bind('<<ComboboxSelected>>',lambda event:self.set_bar_input(self.training))
+        Tooltip(self.bar_input_choice,'Choose which input the macro holds for this training mode. Changing this pauses the macro and releases input.')
         self.area_label=tk.Label(setup,text='',font=('Segoe UI',9),fg=muted,bg=card,anchor='w')
         self.area_label.pack(fill='x')
         self.update_area_label()
         stats=tk.Frame(outer,bg=bg)
-        stats.pack(fill='x',pady=12)
+        stats.pack(fill='x',pady=6)
         self.stat_labels=[]
         self.stat_titles=[]
         for index,(title,value) in enumerate((('TARGETS CLICKED','0'),('LAST RESULT','—'),('CLICK PATTERN','Until resolved'))):
             stats.columnconfigure(index,weight=1,uniform='stat')
-            box=tk.Frame(stats,bg=card,padx=14,pady=10)
+            box=tk.Frame(stats,bg=card,padx=14,pady=5)
             box.grid(row=0,column=index,sticky='ew',padx=(0,8) if index<2 else 0)
             stat_title=tk.Label(box,text=title,font=('Segoe UI',8,'bold'),fg=muted,bg=card)
             stat_title.pack(anchor='w')
@@ -720,46 +932,430 @@ class App:
             label=tk.Label(box,text=value,font=('Segoe UI',15,'bold'),fg=accent,bg=card)
             label.pack(anchor='w',pady=(3,0))
             self.stat_labels.append(label)
-        live=tk.Frame(outer,bg=card,padx=12,pady=10)
+        live=tk.Frame(outer,bg=card,padx=12,pady=8)
         live.pack(fill='both',expand=True)
         live_header=tk.Frame(live,bg=card)
-        live_header.pack(fill='x',pady=(0,8))
+        live_header.pack(fill='x',pady=(0,5))
         tk.Label(live_header,text='LIVE TRACKING',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(side='left')
+        self.full_follow=ttk.Checkbutton(live_header,text='Follow markers',variable=self.focus_var,command=self.set_focus_preview)
+        self.full_follow.pack(side='left',padx=12)
+        self.full_overview=tk.Label(live_header,text='Fixed overview',font=('Segoe UI',9),fg=muted,bg=card)
         tk.Label(live_header,textvariable=self.scan_info,font=('Segoe UI',9),fg=accent,bg=card).pack(side='right')
-        self.preview=tk.Canvas(live,bg='#0c1119',height=90,highlightthickness=0)
+        self.preview=tk.Canvas(live,bg='#0c1119',height=160,highlightthickness=0)
         self.preview.pack(fill='both',expand=True)
         self.preview.create_text(350,110,text='Your game preview will appear here',fill=muted,font=('Segoe UI',12),tags='placeholder')
-        self.preview.bind('<Configure>',lambda e:self.preview.coords('placeholder',e.width/2,e.height/2))
+        self.preview.bind('<Configure>',self.preview_resized)
         tk.Label(live,textvariable=self.capture_info,font=('Segoe UI',8),fg=muted,bg=card,anchor='w').pack(fill='x',pady=(4,0))
         legend=tk.Frame(live,bg=card)
-        legend.pack(fill='x',pady=(7,0))
+        legend.pack(fill='x',pady=(4,0))
         self.legend_label=tk.Label(legend,text='',font=('Segoe UI',9),fg=muted,bg=card)
         self.legend_label.pack(side='left')
         self.color_label=tk.Label(legend,textvariable=self.color_info,font=('Segoe UI',9,'bold'),fg=muted,bg=card)
         self.color_label.pack(side='right')
-        tk.Label(outer,textvariable=self.status,font=('Segoe UI',9),fg=ink,bg=bg,wraplength=720,anchor='w',justify='left').pack(fill='x',pady=(12,8))
-        activity=tk.Frame(outer,bg=card,padx=10,pady=8)
+        tk.Label(full_bottom,textvariable=self.status,font=('Segoe UI',9),fg=ink,bg=bg,wraplength=720,anchor='w',justify='left').pack(fill='x',pady=(8,4))
+        activity=tk.Frame(full_bottom,bg=card,padx=10,pady=8)
         activity.pack(fill='x')
         tk.Label(activity,text='ACTIVITY',font=('Segoe UI',8,'bold'),fg=muted,bg=card).pack(anchor='w',pady=(0,5))
         scroll=ttk.Scrollbar(activity)
         scroll.pack(side='right',fill='y')
-        self.log=tk.Text(activity,height=4,bg=card,fg=muted,insertbackground=ink,font=('Consolas',9),relief='flat',state='disabled',wrap='word',yscrollcommand=scroll.set)
-        self.log.pack(fill='x')
+        self.log=tk.Text(activity,height=2,bg=card,fg=muted,insertbackground=ink,font=('Consolas',9),relief='flat',state='disabled',wrap='word',yscrollcommand=scroll.set)
+        self.log.pack(fill='both',expand=True)
         scroll.configure(command=self.log.yview)
-        footer=tk.Frame(outer,bg=bg)
-        footer.pack(fill='x',pady=(12,0))
+        footer=tk.Frame(full_bottom,bg=bg)
+        footer.pack(fill='x',pady=(6,0))
         tk.Label(footer,textvariable=self.key_hint,font=('Segoe UI',10,'bold'),fg=accent,bg=bg).pack(side='left')
         self.update_key_hint()
         pause_button=ttk.Button(footer,text='Pause',command=self.stop_button)
         pause_button.pack(side='right')
         Tooltip(pause_button,'Pause controls and cancel pending mouse or key input. Live tracking continues while paused.')
+        self.full_preview=self.preview
+        self.build_compact_ui()
+        self.add_control_help(self.full_view)
+        self.add_control_help(self.compact_view_frame)
         self.refresh_training_ui()
         self.tabs.bind('<<NotebookTabChanged>>',self.change_training)
+        self.tab_tooltip=Tooltip(self.tabs,lambda:training_instructions(TRAINING_MODES[self._tab_hover]) if self._tab_hover is not None else '')
+        self.tabs.bind('<Motion>',self.hover_training_tab,add='+')
+        self.tabs.bind('<Leave>',lambda event:setattr(self,'_tab_hover',None),add='+')
+        self.apply_view()
+
+    def add_control_help(self,container):
+        messages={
+            'Select minigame area':'Drag a rectangle around the minigame in Roblox. The macro searches that area for circles, keys, or the training bar.',
+            'Full screen':'Search the whole primary display instead of a manually selected area. Keep Roblox visible on that display.',
+            'Use full screen':'Search the whole primary display instead of a manually selected area. Keep Roblox visible on that display.',
+            'Feedback':'Select the result text, such as MISS or a signed decimal, if automatic reading is unreliable. This switches to manual result reading. Bar modes read their own training meter.',
+            'Select feedback':'Select the result text, such as MISS or a signed decimal, if automatic reading is unreliable. This switches to manual result reading.',
+            'Automatic feedback':'Automatically locate and read the training result. Ren/Ten uses confirmed results to adjust click timing. Bar modes track the bar instead.',
+            'Record':'Press the key or key combination you want to use. The macro pauses while you change keybinds.',
+            'Full view':'Open the full interface with expanded instructions, capture settings, tracking, and activity.',
+            'Compact view':'Switch to the smaller interface with Tracking, Data, Settings, and Instructions tabs.',
+            'Light mode':'Use the light color theme. Your chosen theme is saved locally.',
+            'Dark mode':'Use the dark color theme. Your chosen theme is saved locally.',
+            'Always on top':'Keep this panel above other windows. Place it clear of minigame targets; interacting with the panel pauses game input.',
+            'Follow minigame markers':'Follow detected circles, verified key prompts, or the training bar in the preview. Framing is held briefly between targets to avoid zoom flashes.',
+            'Follow markers':'Follow minigame markers in the preview without changing the area used for detection.',
+            'Instructions':'Open the numbered setup instructions and tips for the selected training mode.',
+            'Pause':'Stop macro input and release held controls. Live tracking continues.'
+        }
+        for widget in container.winfo_children():
+            if not hasattr(widget,'_macro_tooltip'):
+                if isinstance(widget,ThemedChoice):
+                    message=('Choose Left click or Space for this bar-training mode. Changing it pauses input.'
+                             if widget in (self.bar_input_choice,self.compact_bar_choice)
+                             else 'Choose a start/pause or pause key. Use Record for a custom combination. Changing a keybind pauses the macro.')
+                else:
+                    try:message=messages.get(str(widget.cget('text')))
+                    except tk.TclError:message=None
+                if message:Tooltip(widget,message)
+            self.add_control_help(widget)
+
+    def build_compact_ui(self):
+        bg,card,ink,muted,accent=self.colors
+        self.compact_view_frame=tk.Frame(self.root,bg=bg,padx=12,pady=10)
+        outer=self.compact_view_frame
+        header=tk.Frame(outer,bg=bg);header.pack(fill='x',pady=(0,8))
+        tk.Label(header,text='Beyond Nen | Training Assistant',font=('Segoe UI',11,'bold'),fg=ink,bg=bg).pack(side='left')
+        self.compact_badge=tk.Label(header,text='PAUSED',font=('Segoe UI',9,'bold'),fg=muted,bg=bg)
+        self.compact_badge.pack(side='right')
+        selector=tk.Frame(outer,bg=bg);selector.pack(fill='x',pady=(0,8))
+        self.compact_mode=tk.Button(selector,textvariable=self.mode_var,command=self.show_training_menu,
+                                    font=('Segoe UI',10,'bold'),bg=card,fg=ink,activebackground=card,activeforeground=accent,
+                                    relief='flat',borderwidth=0,highlightthickness=0,anchor='w',padx=10,pady=6,cursor='hand2')
+        self.compact_mode.pack(fill='x')
+        Tooltip(self.compact_mode,lambda:training_instructions(self.training))
+        display=tk.Frame(outer,bg=bg);display.pack(fill='x',pady=(0,8))
+        ttk.Button(display,text='Full view',style='Compact.TButton',command=lambda:self.set_view(False)).pack(side='left')
+        ttk.Button(display,text='Dark mode' if self.light_var.get() else 'Light mode',style='Compact.TButton',command=self.toggle_theme).pack(side='left',padx=6)
+        ttk.Checkbutton(display,text='Always on top',variable=self.topmost_var,command=self.set_topmost,style='Compact.TCheckbutton').pack(side='left')
+        bottom=tk.Frame(outer,bg=bg);bottom.pack(side='bottom',fill='x')
+        pages=ttk.Notebook(outer,style='Compact.TNotebook');pages.pack(fill='both',expand=True)
+        self.compact_pages=pages
+        tracking=tk.Frame(pages,bg=card,padx=10,pady=10)
+        data=tk.Frame(pages,bg=card,padx=10,pady=10)
+        settings=tk.Frame(pages,bg=card,padx=10,pady=10)
+        pages.add(tracking,text='Tracking');pages.add(data,text='Data');pages.add(settings,text='Settings')
+        self.instructions_page=tk.Frame(pages,bg=card,padx=10,pady=10)
+        pages.add(self.instructions_page,text='Instructions')
+        instructions_scroll=ttk.Scrollbar(self.instructions_page);instructions_scroll.pack(side='right',fill='y')
+        self.instructions_body=tk.Text(self.instructions_page,font=('Segoe UI',9),fg=ink,bg=card,wrap='word',relief='flat',borderwidth=0,highlightthickness=0,height=8,width=1,state='disabled',yscrollcommand=instructions_scroll.set)
+        self.instructions_body.pack(fill='both',expand=True)
+        instructions_scroll.configure(command=self.instructions_body.yview)
+        tk.Label(tracking,textvariable=self.focus_info,font=('Segoe UI',9,'bold'),fg=accent,bg=card,anchor='w',wraplength=330).pack(fill='x',pady=(0,6))
+        self.compact_preview=tk.Canvas(tracking,bg='#0c1119',height=110,highlightthickness=0)
+        self.compact_preview.pack(fill='both',expand=True)
+        self.compact_preview.bind('<Configure>',self.preview_resized)
+        self.compact_preview.create_text(160,85,text='Choose a capture area in Settings',fill='#98a7bc',font=('Segoe UI',10),width=280,tags='placeholder')
+        self.compact_follow=ttk.Checkbutton(tracking,text='Follow minigame markers',variable=self.focus_var,command=self.set_focus_preview)
+        self.compact_follow.pack(anchor='w',pady=(6,2))
+        self.compact_overview=tk.Label(tracking,text='Fixed overview for moving targets',font=('Segoe UI',9),fg=muted,bg=card)
+        self.compact_scan_label=tk.Label(tracking,textvariable=self.scan_info,font=('Segoe UI',9),fg=accent,bg=card,wraplength=330,anchor='w')
+        self.compact_scan_label.pack(fill='x')
+        tk.Label(tracking,textvariable=self.color_info,font=('Segoe UI',9),fg=muted,bg=card,wraplength=330,anchor='w').pack(fill='x',pady=(3,0))
+        self.compact_stat_titles=[];self.compact_stat_values=[]
+        for index in range(3):
+            row=tk.Frame(data,bg=card);row.pack(fill='x',pady=(0,7))
+            title=tk.Label(row,text='',font=('Segoe UI',9),fg=muted,bg=card);title.pack(side='left')
+            value=tk.Label(row,text='',font=('Segoe UI',12,'bold'),fg=accent,bg=card);value.pack(side='right')
+            self.compact_stat_titles.append(title);self.compact_stat_values.append(value)
+        tk.Label(data,text='ACTIVITY',font=('Segoe UI',9,'bold'),fg=muted,bg=card).pack(anchor='w',pady=(6,5))
+        self.compact_log=tk.Text(data,height=5,bg=card,fg=muted,font=('Consolas',8),wrap='word',state='disabled',relief='flat')
+        self.compact_log.pack(fill='both',expand=True)
+        tk.Label(data,textvariable=self.capture_info,font=('Segoe UI',8),fg=muted,bg=card,wraplength=330,justify='left').pack(fill='x',pady=(6,0))
+        capture=tk.Frame(settings,bg=card);capture.pack(fill='x',pady=(0,6))
+        capture.columnconfigure(0,weight=1);capture.columnconfigure(1,weight=1)
+        for index,(title,command) in enumerate([('Select minigame area',lambda:self.select('game')),('Full screen',self.use_full_screen),('Feedback',lambda:self.select('feedback'))]):
+            button=ttk.Button(capture,text=title,command=command,style='Compact.TButton')
+            if index==0:button.grid(row=0,column=0,columnspan=2,sticky='ew',pady=(0,4))
+            else:button.grid(row=1,column=index-1,sticky='ew',padx=(0,4) if index==1 else (0,0))
+            if title=='Feedback':self.compact_feedback_button=button
+        self.compact_auto_feedback=ttk.Checkbutton(settings,text='Automatic feedback',variable=self.auto_feedback,command=self.set_feedback_mode)
+        self.compact_auto_feedback.pack(anchor='w',pady=(0,4))
+        for title,variable in [('Start / pause',self.start_key),('Pause',self.pause_key)]:
+            row=tk.Frame(settings,bg=card);row.pack(fill='x',pady=3)
+            tk.Label(row,text=title,font=('Segoe UI',9),fg=muted,bg=card,width=11,anchor='w').pack(side='left')
+            choice=ThemedChoice(row,textvariable=variable,values=tuple(KEY_CODES),state='readonly',width=9);choice.pack(side='left',padx=(0,5))
+            choice.bind('<<ComboboxSelected>>',self.set_keybinds)
+            ttk.Button(row,text='Record',style='Compact.TButton',command=lambda v=variable:self.record_keybind(v)).pack(side='left')
+        self.compact_bar_row=tk.Frame(settings,bg=card)
+        tk.Label(self.compact_bar_row,text='Control input',font=('Segoe UI',9),fg=muted,bg=card,width=11,anchor='w').pack(side='left')
+        self.compact_bar_choice=ThemedChoice(self.compact_bar_row,values=('Left click','Space'),state='readonly',width=12);self.compact_bar_choice.pack(side='left')
+        self.compact_bar_choice.bind('<<ComboboxSelected>>',lambda event:self.set_bar_input(self.training))
+        self.compact_options=tk.Frame(settings,bg=card);self.compact_options.pack(fill='x',pady=(6,0))
+        ttk.Button(self.compact_options,text='Instructions',style='Compact.TButton',command=lambda:pages.select(self.instructions_page)).pack(anchor='w',pady=(6,0))
+        tk.Label(bottom,textvariable=self.status,font=('Segoe UI',9),fg=ink,bg=bg,wraplength=350,justify='left',anchor='w').pack(fill='x',pady=(8,4))
+        footer=tk.Frame(bottom,bg=bg);footer.pack(fill='x')
+        self.compact_footer=footer
+        tk.Label(footer,textvariable=self.key_hint,font=('Segoe UI',9,'bold'),fg=accent,bg=bg,wraplength=270,justify='left').pack(side='left')
+        ttk.Button(footer,text='Pause',command=self.stop_button,style='Compact.TButton').pack(side='right')
+
+    def hover_training_tab(self,event):
+        try:index=self.tabs.index(f'@{event.x},{event.y}')
+        except tk.TclError:index=None
+        if index!=self._tab_hover:
+            self._tab_hover=index
+            self.tab_tooltip.hide()
+            if index is not None:self.tab_tooltip.enter()
+
+    def close_training_menu(self):
+        popup=self.training_popup
+        self.training_popup=None
+        if popup is not None:
+            try:popup.grab_release();popup.destroy()
+            except tk.TclError:pass
+
+    def choose_training(self,mode):
+        self.close_training_menu()
+        self.mode_var.set(mode)
+        self.select_compact_training()
+
+    def show_training_menu(self):
+        if self.training_popup is not None:
+            self.close_training_menu();return
+        bg,card,ink,muted,accent=self.colors
+        popup=tk.Toplevel(self.root);self.training_popup=popup
+        popup.withdraw();popup.overrideredirect(True);popup.transient(self.root)
+        popup.attributes('-topmost',True)
+        popup.configure(bg=card);popup.ui_colors=self.colors
+        for mode in TRAINING_MODES:
+            button=tk.Button(popup,text=mode,command=lambda value=mode:self.choose_training(value),
+                             font=('Segoe UI',10),bg=card,fg=accent if mode==self.training else ink,
+                             activebackground=bg,activeforeground=accent,relief='flat',borderwidth=0,
+                             highlightthickness=0,anchor='w',padx=10,pady=7,cursor='hand2')
+            button.pack(fill='x')
+            Tooltip(button,lambda value=mode:training_instructions(value))
+        popup.update_idletasks()
+        width=max(220,self.compact_mode.winfo_width())
+        height=popup.winfo_reqheight()
+        x=min(self.compact_mode.winfo_rootx(),self.root.winfo_screenwidth()-width-8)
+        y=self.compact_mode.winfo_rooty()+self.compact_mode.winfo_height()
+        if y+height>self.root.winfo_screenheight():y=self.compact_mode.winfo_rooty()-height
+        popup.geometry(f'{width}x{height}+{max(0,x)}+{max(0,y)}')
+        def dismiss(event):
+            if not (popup.winfo_rootx()<=event.x_root<popup.winfo_rootx()+popup.winfo_width() and
+                    popup.winfo_rooty()<=event.y_root<popup.winfo_rooty()+popup.winfo_height()):self.close_training_menu()
+        popup.bind('<ButtonPress-1>',dismiss,add='+')
+        popup.bind('<Escape>',lambda event:self.close_training_menu())
+        popup.deiconify();popup.lift();popup.grab_set();popup.focus_set()
+
+    def style_titlebar(self):
+        """Apply Windows DWM colors to this app window only, when supported."""
+        if self.closed.is_set():return
+        try:
+            user=ctypes.WinDLL('user32')
+            user.GetAncestor.argtypes=[wintypes.HWND,wintypes.UINT]
+            user.GetAncestor.restype=wintypes.HWND
+            hwnd=user.GetAncestor(self.root.winfo_id(),2)
+            dwm=ctypes.WinDLL('dwmapi')
+            dwm.DwmSetWindowAttribute.argtypes=[wintypes.HWND,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD]
+            dwm.DwmSetWindowAttribute.restype=ctypes.c_long
+            dark=ctypes.c_int(not self.light_var.get())
+            dwm.DwmSetWindowAttribute(hwnd,20,ctypes.byref(dark),ctypes.sizeof(dark))
+            for attribute,color in [(35,self.colors[0]),(36,self.colors[2]),(34,self.colors[0])]:
+                rgb=[int(color[index:index+2],16) for index in (1,3,5)]
+                value=wintypes.DWORD(rgb[0]|rgb[1]<<8|rgb[2]<<16)
+                dwm.DwmSetWindowAttribute(hwnd,attribute,ctypes.byref(value),ctypes.sizeof(value))
+        except (OSError,AttributeError,tk.TclError):pass
+
+    def select_compact_training(self,event=None):
+        self.tabs.select(TRAINING_MODES.index(self.mode_var.get()))
+        self.change_training()
+
+    def window_coordinates(self):
+        try:
+            user=ctypes.WinDLL('user32')
+            user.GetAncestor.argtypes=[wintypes.HWND,wintypes.UINT];user.GetAncestor.restype=wintypes.HWND
+            user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+            rect=wintypes.RECT()
+            if user.GetWindowRect(user.GetAncestor(self.root.winfo_id(),2),ctypes.byref(rect)):
+                return rect.left,rect.top
+        except OSError:pass
+        return self.root.winfo_x(),self.root.winfo_y()
+
+    def place_window(self,x,y):
+        try:
+            class MonitorInfo(ctypes.Structure):
+                _fields_=[('cbSize',wintypes.DWORD),('rcMonitor',wintypes.RECT),('rcWork',wintypes.RECT),('dwFlags',wintypes.DWORD)]
+            user=ctypes.WinDLL('user32')
+            user.GetAncestor.argtypes=[wintypes.HWND,wintypes.UINT];user.GetAncestor.restype=wintypes.HWND
+            user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+            user.MonitorFromRect.argtypes=[ctypes.POINTER(wintypes.RECT),wintypes.DWORD];user.MonitorFromRect.restype=wintypes.HANDLE
+            user.GetMonitorInfoW.argtypes=[wintypes.HANDLE,ctypes.POINTER(MonitorInfo)]
+            user.SetWindowPos.argtypes=[wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
+            hwnd=user.GetAncestor(self.root.winfo_id(),2)
+            current=wintypes.RECT();user.GetWindowRect(hwnd,ctypes.byref(current))
+            width=current.right-current.left;height=current.bottom-current.top
+            # Resize borders can legitimately extend past the work area while
+            # the visible frame is exactly aligned to the screen edge.
+            insets=(0,0,0,0)
+            try:
+                dwm=ctypes.WinDLL('dwmapi')
+                dwm.DwmGetWindowAttribute.argtypes=[wintypes.HWND,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD]
+                visible=wintypes.RECT()
+                if dwm.DwmGetWindowAttribute(hwnd,9,ctypes.byref(visible),ctypes.sizeof(visible))==0:
+                    candidate=(visible.left-current.left,visible.top-current.top,current.right-visible.right,current.bottom-visible.bottom)
+                    if all(0<=value<=64 for value in candidate):insets=candidate
+            except OSError:pass
+            left_inset,top_inset,right_inset,bottom_inset=insets
+            requested=wintypes.RECT(x,y,x+width,y+height)
+            monitor=user.MonitorFromRect(ctypes.byref(requested),2)
+            info=MonitorInfo();info.cbSize=ctypes.sizeof(info)
+            if monitor and user.GetMonitorInfoW(monitor,ctypes.byref(info)):
+                x=max(info.rcWork.left-left_inset,min(x,info.rcWork.right-width+right_inset))
+                y=max(info.rcWork.top-top_inset,min(y,info.rcWork.bottom-height+bottom_inset))
+            if user.SetWindowPos(hwnd,None,x,y,0,0,0x0015):return
+        except (OSError,OverflowError):pass
+        x=max(0,min(x,self.root.winfo_screenwidth()-self.root.winfo_width()))
+        y=max(0,min(y,self.root.winfo_screenheight()-self.root.winfo_height()-40))
+        self.root.geometry(f'+{x}+{y}')
+
+    def finish_window_placement(self):
+        self._position_restore_job=None
+        self._position_restoring=False
+        if not self.closed.is_set():self.remember_window_position()
+
+    def window_moved(self,event):
+        if event.widget!=self.root or self._position_restoring or self.closed.is_set():return
+        if self._position_job is not None:self.root.after_cancel(self._position_job)
+        self._position_job=self.root.after(750,self.remember_window_position)
+
+    def remember_window_position(self):
+        if not hasattr(self,'_layout_view') or self._position_restoring or self.closed.is_set():return
+        if self.root.state()!='normal':return
+        if self._position_job is not None:
+            self.root.after_cancel(self._position_job);self._position_job=None
+        x,y=self.window_coordinates()
+        positions=self.config.setdefault('window_positions',{})
+        position={'x':int(x),'y':int(y)}
+        if positions.get(self._layout_view)!=position:
+            positions[self._layout_view]=position;self.save()
+
+    def set_view(self,compact=None):
+        self.close_training_menu()
+        self.remember_window_position()
+        if compact is not None:self.compact_var.set(compact)
+        self.config['compact_view']=bool(self.compact_var.get())
+        self.apply_view();self.save()
+
+    def apply_view(self):
+        self._position_restoring=True
+        compact=bool(self.compact_var.get())
+        first=not hasattr(self,'_layout_applied')
+        if compact:
+            self.full_view.pack_forget();self.compact_view_frame.pack(fill='both',expand=True)
+            self.preview=self.compact_preview
+            self.root.minsize(360,520)
+            width,height=400,min(560,self.root.winfo_screenheight()-80)
+        else:
+            self.compact_view_frame.pack_forget();self.full_view.pack(fill='both',expand=True,padx=24,pady=12)
+            self.preview=self.full_preview
+            self.root.minsize(710,min(920,self.root.winfo_screenheight()-80))
+            width,height=790,min(1000,self.root.winfo_screenheight()-80)
+        view='compact' if compact else 'full'
+        saved=self.config.get('window_positions',{}).get(view)
+        if isinstance(saved,dict) and isinstance(saved.get('x'),int) and isinstance(saved.get('y'),int):
+            x,y=saved['x'],saved['y']
+        elif not first:x,y=self.window_coordinates()
+        else:x,y=max(0,self.root.winfo_screenwidth()-width-24),40
+        self.root.geometry(f'{width}x{height}')
+        self.root.update_idletasks()
+        self.place_window(x,y)
+        self._layout_view=view
+        if self._position_restore_job is not None:
+            self.root.after_cancel(self._position_restore_job)
+        self._position_restore_job=self.root.after(150,self.finish_window_placement)
+        self._layout_applied=True
+        self.root.attributes('-topmost',bool(self.topmost_var.get()))
+        self._preview_dirty=True
+        self.root.after_idle(self.style_titlebar)
+        self.sync_compact_data()
+
+    def set_topmost(self):
+        self.config['always_on_top']=bool(self.topmost_var.get())
+        self.root.attributes('-topmost',self.config['always_on_top']);self.save()
+
+    def set_focus_preview(self):
+        self.config['focus_preview']=bool(self.focus_var.get());self._preview_dirty=True;self.save()
+
+    def toggle_theme(self):
+        self.light_var.set(not self.light_var.get())
+        self.set_light_mode()
+
+    def set_light_mode(self):
+        self.close_training_menu()
+        self.remember_window_position()
+        self.config['light_mode']=bool(self.light_var.get())
+        history=self.log.get('1.0','end-1c')
+        summary_tags={tag:tuple(map(str,self.log.tag_ranges(tag))) for tag in self.log.tag_names() if tag.startswith('bar_summary_')}
+        values=[str(label.cget('text')) for label in self.stat_labels]
+        for child in self.root.winfo_children():child.destroy()
+        self.build_ui()
+        for label,value in zip(self.stat_labels,values):label.configure(text=value)
+        for log in (self.log,self.compact_log):
+            log.configure(state='normal');log.insert('end',history);log.configure(state='disabled');log.see('end')
+            for tag,ranges in summary_tags.items():
+                if len(ranges)==2:log.tag_add(tag,*ranges)
+        self._preview_dirty=True;self.save()
+
+    def preview_resized(self,event=None):
+        self._preview_dirty=True
+        if event:event.widget.coords('placeholder',event.width/2,event.height/2)
+
+    def render_preview(self):
+        frame=self._last_preview
+        if self.focus_var.get() and self._preview_rect is not None:
+            frame=crop_preview(frame,self._preview_rect) if self.training in BAR_MODES else stable_preview_crop(frame,self._preview_rect)
+        image=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
+        width=max(1,self.preview.winfo_width());height=max(1,self.preview.winfo_height())
+        image_height=height if self.training in BAR_MODES else min(height,120 if self.compact_var.get() else 140)
+        scale=min(3.,width/image.width,image_height/image.height)
+        image=image.resize((max(1,round(image.width*scale)),max(1,round(image.height*scale))),Image.Resampling.LANCZOS)
+        self.photo=ImageTk.PhotoImage(image)
+        self.preview.delete('all');self.preview.create_image(width/2,height/2,image=self.photo)
+        self._preview_dirty=False
+
+    def sync_compact_data(self):
+        bg,card,ink,muted,accent=self.colors
+        for title,original in zip(self.compact_stat_titles,self.stat_titles):title.configure(text=original.cget('text'))
+        for value,original in zip(self.compact_stat_values,self.stat_labels):value.configure(text=original.cget('text'))
+        self.compact_badge.configure(text='ERROR' if self.capture_error else 'RUNNING' if self.running.is_set() else 'PAUSED',fg='#b34020' if self.capture_error else accent if self.running.is_set() else muted)
+
+    def point_over_panel(self,x,y):
+        bounds=self.panel_bounds
+        return bool(bounds and bounds[0]<=x<bounds[0]+bounds[2] and bounds[1]<=y<bounds[1]+bounds[3])
+
+    def fit_training_panel(self):
+        if self.closed.is_set():return
+        selected=self.tabs.select()
+        if selected:
+            panel=self.tabs.nametowidget(selected)
+            self.tabs.configure(height=panel.winfo_reqheight())
 
     def refresh_training_ui(self):
+        self.root.after_idle(self.fit_training_panel)
+        self.mode_var.set(self.training)
+        self.instructions_text.set(training_instructions(self.training))
+        self.instructions_body.configure(state='normal')
+        self.instructions_body.delete('1.0','end');self.instructions_body.insert('end',self.instructions_text.get())
+        self.instructions_body.configure(state='disabled');self.instructions_body.yview_moveto(0)
         shu=self.training in BAR_MODES
         en=self.training=='En/Ken'
         ko=self.training=='Ko/RyuS/RyuD'
+        self.full_overview.pack_forget();self.compact_overview.pack_forget()
+        self.full_follow.pack(side='left',padx=12)
+        self.compact_follow.pack(anchor='w',pady=(6,2),before=self.compact_scan_label)
+        if shu:
+            self.bar_input_choice.configure(textvariable=self.control_vars[self.training])
+            self.bar_input_row.pack(side='left',padx=(4,0))
+        else:
+            self.bar_input_row.pack_forget()
+        if hasattr(self,'compact_bar_row'):
+            self.compact_feedback_button.state(['disabled'] if shu else ['!disabled'])
+            self.compact_auto_feedback.state(['disabled'] if shu else ['!disabled'])
+            if shu:
+                self.compact_bar_choice.configure(textvariable=self.control_vars[self.training])
+                self.compact_bar_row.pack(fill='x',pady=6,before=self.compact_options)
+            else:self.compact_bar_row.pack_forget()
         self.update_area_label()
         for label,text in zip(self.stat_titles,('KEYS SENT','LAST RESULT','PROMPT') if en else ('ROUND','ATTEMPTS','CONTROL') if ko else ('FOCUS','CYCLES','CONTROL') if shu else ('TARGETS CLICKED','LAST RESULT','CLICK PATTERN')):
             label.configure(text=text)
@@ -777,6 +1373,11 @@ class App:
         if selected==self.training:return
         self.pause()
         self.training=selected
+        self._last_preview=None
+        self._preview_rect=None
+        self._preview_extent=None
+        self.preview.delete('all')
+        self.focus_info.set('Searching for minigame markers')
         self.config['training_mode']=selected
         self.save()
         self.refresh_training_ui()
@@ -795,7 +1396,7 @@ class App:
 
     def update_key_hint(self):
         self.key_hint.set(f"{self.config['start_key']}  Start / pause     {self.config['pause_key']}  Pause")
-        self.menu_hint.set("To start the macro without getting kicked from the meditation:\nOpen the Roblox menu, press your configured start keybind, then close the menu to return to the minigame. Pressing your start keybind directly during meditation can interrupt it.")
+        self.menu_hint.set("Open the Roblox menu, press your configured start keybind, then close the menu to return to the minigame. Pressing your start keybind directly during meditation can interrupt it.")
 
     def set_keybinds(self,event=None):
         self.pause()
@@ -869,6 +1470,8 @@ class App:
                 screen=sct.monitors[1]
                 self.config['game']={k:int(screen[k]) for k in ('left','top','width','height')}
             self.config['capture_mode']='full_screen'
+            self._preview_rect=None
+            self._preview_extent=None
             self.save()
             self.update_area_label()
             self.status.set(f"Full screen selected (primary display). Focus Roblox and press {self.config['start_key']} to start.")
@@ -918,6 +1521,8 @@ class App:
                 self.config[key]={'left':int(x+monitor['left']),'top':int(y+monitor['top']),'width':int(w),'height':int(h)}
                 if key=='game':
                     self.config['capture_mode']='custom'
+                    self._preview_rect=None
+                    self._preview_extent=None
                 else:
                     self.config['auto_feedback']=False
                     self.auto_feedback.set(False)
@@ -978,6 +1583,9 @@ class App:
     def capture_loop(self):
         detector=Detector()
         en_token=0
+        en_verified_token=None
+        en_verified_at=0.
+        en_candidate_rect=None
         en_signature=None
         en_last_seen=0.
         en_session=-1
@@ -989,13 +1597,11 @@ class App:
         en_last_feedback=None
         en_last_feedback_job=0.
         en_missing_reported=False
+        en_last_confirmed=time.perf_counter()
         shu=ShuController()
         ko=KoController()
-        last_ko_attempts=0
+        bar_activity=BarActivityTracker()
         last_shu_session=-1
-        shu_visible=False
-        shu_last_seen=time.perf_counter()
-        shu_missing_reported=False
         shu_cycles=0
         tuner=Tuner(self.config['lead_ms'])
         previous_session=-1
@@ -1059,7 +1665,7 @@ class App:
                     # When inspecting the panel, do not detect circles inside
                     # its own scaled preview. Bounds are cached by the UI thread.
                     bounds=self.panel_bounds
-                    if bounds and not window_frame and not foreground_is_roblox():
+                    if bounds and not window_frame:
                         px,py,pw,ph=bounds
                         x0=max(0,px-region['left']); y0=max(0,py-region['top'])
                         x1=min(frame.shape[1],px+pw-region['left']); y1=min(frame.shape[0],py+ph-region['top'])
@@ -1071,37 +1677,49 @@ class App:
                     last_stamp=processed_at
                     detection_scale=min(1.,960/frame.shape[1])
                     detection_frame=cv2.resize(frame,None,fx=detection_scale,fy=detection_scale,interpolation=cv2.INTER_AREA) if detection_scale<1 else frame
+                    if self.training not in BAR_MODES:
+                        for activity in bar_activity.finish('tracking ended: training mode changed'):self.events.put(activity)
+                        bar_activity.mode=None
                     if self.training=='En/Ken':
                         now=time.perf_counter()
                         if en_session!=session:
                             en_token+=1;en_signature=None;en_sent=False;en_key=None;en_unknown=False
                             en_last_seen=now;en_session=session;en_missing_reported=False
+                            en_last_confirmed=now
+                            en_verified_token=None;en_verified_at=0.;en_candidate_rect=None
                         prompt=detect_en_prompt(detection_frame)
                         if prompt is not None:
-                            changed=en_signature is None or np.mean(prompt.signature!=en_signature)>.22
+                            moved=en_candidate_rect is None or sum(abs(a-b) for a,b in zip(prompt.rect,en_candidate_rect))>max(12,(prompt.rect[2]-prompt.rect[0])*.8)
+                            changed=en_signature is None or moved or np.mean(prompt.signature!=en_signature)>.22
+                            en_candidate_rect=prompt.rect
                             if changed:
                                 en_token+=1;en_sent=False;en_key=None;en_unknown=False
                                 en_signature=prompt.signature.copy()
+                                en_verified_token=None;en_verified_at=0.
                             en_last_seen=now
-                            en_missing_reported=False
-                            if not en_sent and now-en_last_job>.12:
+                            if now-en_last_job>.12 and (not en_sent or now-en_verified_at>.30):
                                 self.latest(self.en_frames,(session,now,(prompt.glyph.copy(),prompt.label.copy()),False,'en',en_token))
                                 en_last_job=now
                         elif now-en_last_seen>.10 and en_signature is not None:
                             en_token+=1;en_signature=None;en_sent=False;en_key=None;en_unknown=False
-                        if self.running.is_set() and now-en_last_seen>6 and not en_missing_reported:
-                            self.events.put('No En prompt detected. Check the capture area and keep the minigame visible; no keys sent.')
+                            en_verified_token=None;en_verified_at=0.;en_candidate_rect=None
+                        if self.running.is_set() and now-en_last_confirmed>7 and not en_missing_reported:
+                            self.events.put('En/Ken training interrupted or not visible: no verified prompt for 7s. Check the game and capture area.')
                             en_missing_reported=True
                         while True:
                             try:sid,ts,token,key=self.en_results.get_nowait()
                             except queue.Empty:break
-                            if sid!=session or token!=en_token or now-ts>.40 or prompt is None or en_sent:continue
+                            if sid!=session or token!=en_token or now-ts>.40 or prompt is None:continue
                             if key is None:
+                                en_verified_token=None;en_key=None
                                 if not en_unknown:
                                     self.events.put('En prompt unclear or unsupported; no key sent. Checking again.')
                                     en_unknown=True
                                 continue
                             en_key=key
+                            en_verified_token=token;en_verified_at=now
+                            en_last_confirmed=now;en_missing_reported=False
+                            if en_sent:continue
                             def key_allowed(sid=session):
                                 return (self.running.is_set() and self.session==sid and not self.closed.is_set()
                                         and self.training=='En/Ken' and foreground_is_roblox()
@@ -1132,11 +1750,14 @@ class App:
                                 en_last_feedback=value
                                 self.events.put('En result: '+(value if value=='MISS' else f'{value:+.2f}'))
                         if now-last_preview>.05:
-                            if prompt:
+                            confirmed=prompt is not None and en_verified_token==en_token and now-en_verified_at<.65
+                            if confirmed:
                                 x0,y0,x1,y1=[round(v/detection_scale) for v in prompt.rect]
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(255,240,40),2)
-                            self.latest(self.frames,frame)
-                            self.metrics.put(('en',{'count':en_count,'key':en_key,'result':en_last_feedback,'tracked':prompt is not None,'fps':1/max(.001,frame_interval)}))
+                            rect=tuple(v/detection_scale for v in prompt.rect) if confirmed else None
+                            label='Verified key prompt' if confirmed else 'Verifying key prompt' if prompt else 'Searching for key prompts'
+                            self.latest(self.frames,(self.training,frame,rect,label))
+                            self.metrics.put(('en',{'count':en_count,'key':en_key,'result':en_last_feedback,'tracked':confirmed,'fps':1/max(.001,frame_interval)}))
                             last_preview=now
                         self.closed.wait(.005 if self.running.is_set() else .045)
                         continue
@@ -1147,8 +1768,6 @@ class App:
                             shu.holding=False
                             ko.reset()
                             last_shu_session=session
-                            shu_last_seen=time.perf_counter()
-                            shu_missing_reported=False
                         bar=detect_shu(detection_frame)
                         now=time.perf_counter()
                         control=self.control_preferences[self.training]
@@ -1167,24 +1786,11 @@ class App:
                         else:
                             self.keyboard.set_hold(False)
                             self.mouse.set_hold(pressed,guard=hold_allowed)
-                        if bar:
-                            shu_last_seen=now
-                            shu_missing_reported=False
-                            if not shu_visible:
-                                self.events.put(f'{self.training} bar detected: white indicator and gold zone tracked.')
-                            shu_visible=True
-                        else:
-                            if shu_visible:self.events.put(f'{self.training} bar disappeared; input released. Waiting for the next round.')
-                            shu_visible=False
-                            if self.running.is_set() and now-shu_last_seen>6 and not shu_missing_reported:
-                                self.events.put(f'No {self.training} bar detected. Check the capture area and keep the minigame visible; input is released.')
-                                shu_missing_reported=True
-                        if is_ko and ko.attempts!=last_ko_attempts:
-                            self.events.put('Ko/RyuS/RyuD input released in the target zone; waiting for the next attempt.')
-                            last_ko_attempts=ko.attempts
-                        if not is_ko and shu.cycles!=shu_cycles:
-                            self.events.put(f'{self.training} focus reached full and reset; continuing the next cycle.')
-                            shu_cycles=shu.cycles
+                        for activity in bar_activity.update(self.training,bar is not None,now,
+                                                            ko.attempts if is_ko else shu.cycles,
+                                                            active,time.time()):
+                            self.events.put(activity)
+                            if activity['phase']=='ended' and 'interrupted' in activity['text']:shu.peak_focus=0.
                         if now-last_preview>.05:
                             if bar:
                                 x0,x1=round(bar.zone_left/detection_scale),round(bar.zone_right/detection_scale)
@@ -1192,7 +1798,8 @@ class App:
                                 marker=round(bar.marker/detection_scale)
                                 cv2.rectangle(frame,(x0,y0),(x1,y1),(40,200,245),2)
                                 cv2.line(frame,(marker,y0-3),(marker,y1+3),(255,240,40),2)
-                            self.latest(self.frames,frame)
+                            rect=(bar.left/detection_scale,(bar.top-14)/detection_scale,bar.right/detection_scale,(bar.bottom+44)/detection_scale) if bar else None
+                            self.latest(self.frames,(self.training,frame,rect,'Bar and indicator' if bar else 'Searching for the training bar'))
                             held=self.keyboard.pressed==0x20 if control=='Space' else self.mouse.pressed
                             action='Paused' if not active else ('Space held' if control=='Space' else 'Left held') if held else 'Released'
                             self.metrics.put(('shu',{'mode':self.training,'phase':ko.phase if is_ko else None,'focus':bar.focus if bar else None,'cycles':ko.attempts if is_ko else shu.cycles,'action':action,'tracked':bar is not None,'fps':1/max(.001,frame_interval)}))
@@ -1208,8 +1815,8 @@ class App:
                     if tracks:
                         last_target_seen=now
                         no_target_reported=False
-                    elif self.running.is_set() and now-last_target_seen>6 and not no_target_reported:
-                        self.events.put('No targets detected: check the capture area and keep the game visible. Still scanning.')
+                    elif self.running.is_set() and now-last_target_seen>7 and not no_target_reported:
+                        self.events.put('Ren/Ten training interrupted or not visible: no circles detected for 7s. Check the game and capture area.')
                         no_target_reported=True
                     active_ids={id(t) for t in tracks}
                     if self.running.is_set():
@@ -1294,6 +1901,7 @@ class App:
                             continue
                         x=round(region['left']+t.x/detection_scale)
                         y=round(region['top']+t.y/detection_scale)
+                        if self.point_over_panel(x,y):continue
                         if self.running.is_set() and session==self.session and foreground_is_roblox():
                             # Check stop key immediately before sending mouse input, independently of the UI timer.
                             if any(binding_down(binding) for binding in self.hotkeys):
@@ -1310,6 +1918,7 @@ class App:
                                         and time.perf_counter()-target.seen<.20
                                         and (not target.clicked or not any(other is not target and other.born>target.born+.10
                                                     and other.ring is not None and len(other.history)>=3 for other in self.live_tracks))
+                                        and not self.point_over_panel(region['left']+target.x/detection_scale,region['top']+target.y/detection_scale)
                                         and foreground_is_roblox()
                                         and not any(binding_down(binding) for binding in self.hotkeys))
                             def on_sent(details,target=t,sid=session):
@@ -1347,7 +1956,14 @@ class App:
                             cv2.circle(frame,(round(t.x/detection_scale),round(t.y/detection_scale)),round(t.radius/detection_scale),(0,255,0),2)
                             if t.ring:
                                 cv2.circle(frame,(round(t.x/detection_scale),round(t.y/detection_scale)),round(t.ring/detection_scale),(255,0,255),2)
-                        self.latest(self.frames,frame)
+                        candidates=[t for t in tracks if not t.clicked] or list(tracks)
+                        target=min(candidates,key=lambda t:t.born) if candidates else None
+                        rect=None
+                        if target:
+                            radius=max(target.radius*3.6,target.ring or 0,48)/detection_scale
+                            cx,cy=target.x/detection_scale,target.y/detection_scale
+                            rect=(cx-radius,cy-radius,cx+radius,cy+radius)
+                        self.latest(self.frames,(self.training,frame,rect,'Circle and shrinking ring' if target else 'Searching for training circles'))
                         self.metrics.put(('scan',(len(tracks),1/max(.001,frame_interval))))
                         self.metrics.put(('color',(detector.color_status,detector.color_hex)))
                         last_preview=now
@@ -1361,6 +1977,8 @@ class App:
                     error_log.write(json.dumps({'time':time.time(),'event':'capture_error','error':str(exc)})+'\n')
             except OSError:
                 pass
+        finally:
+            for activity in bar_activity.finish('tracking stopped'):self.events.put(activity)
 
     def toggle(self):
         if self.capture_error:
@@ -1371,7 +1989,7 @@ class App:
             self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
             return
         if not self.config.get('game'):
-            self.status.set('Select game or Use full screen first.')
+            self.status.set('Select a minigame area or use full screen first.')
             return
         if self.training in BAR_MODES and self.control_preferences[self.training]=='Space' and any(0x20 in binding for binding in self.hotkeys):
             self.status.set('Space is used for bar control. Choose start/pause keybinds without Space, or select Left click.')
@@ -1392,8 +2010,22 @@ class App:
         with (BASE/'LOGS.jsonl').open('a') as log:
             log.write(json.dumps({'time':time.time(),'event':'started','training':self.training})+'\n')
         # Keep the panel out of the captured playfield while input is active.
-        self.root.iconify()
+        if not self.config.get('compact_view',True) and not self.config.get('always_on_top',False):self.root.iconify()
         self.status.set(f"Running {self.training} — {self.config['pause_key']} pauses")
+
+    def render_bar_activity(self,event):
+        tag=f"bar_summary_{event['key']}"
+        stamp=time.strftime('%H:%M:%S ',time.localtime(event['time']))
+        line=stamp+event['text']
+        for log in (self.log,self.compact_log):
+            log.configure(state='normal')
+            ranges=log.tag_ranges(tag)
+            if ranges:
+                start=log.index(ranges[0]);log.delete(ranges[0],ranges[-1])
+                log.insert(start,line,(tag,))
+            else:
+                log.insert('end',line,(tag,));log.insert('end','\n',())
+            log.see('end');log.configure(state='disabled')
 
     def pump(self):
         if self.root.state()=='normal':
@@ -1410,16 +2042,34 @@ class App:
                     self.status.set(f"Clicks PAUSED — press {self.config['start_key']} in Roblox to resume")
             self.keys[key]=down
         try:
-            frame=self.frames.get_nowait()
-            image=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
-            width=max(100,self.preview.winfo_width())
-            height=max(100,self.preview.winfo_height())
-            image.thumbnail((width,height))
-            self.photo=ImageTk.PhotoImage(image)
-            self.preview.delete('all')
-            self.preview.create_image(width/2,height/2,image=self.photo)
+            payload=self.frames.get_nowait()
+            if isinstance(payload,tuple):
+                mode,frame,rect,label=payload
+                if mode==self.training:
+                    if mode!=self._preview_mode:
+                        self._preview_rect=None;self._preview_extent=None
+                    self._preview_mode=mode
+                    if rect is not None:
+                        self._preview_rect_at=time.perf_counter()
+                        if mode in BAR_MODES:self._preview_rect=rect
+                        else:
+                            x0,y0,x1,y1=rect
+                            requested=max(192,int(np.ceil(max(x1-x0,y1-y0)*1.08/32))*32)
+                            self._preview_extent=max(self._preview_extent or 0,requested)
+                            half=self._preview_extent/2;cx=(x0+x1)/2;cy=(y0+y1)/2
+                            self._preview_rect=(cx-half,cy-half,cx+half,cy+half)
+                    elif mode not in BAR_MODES and time.perf_counter()-self._preview_rect_at>2.:
+                        self._preview_rect=None;self._preview_extent=None
+                    self._last_preview=frame
+                    if rect is None and self._preview_rect is not None:
+                        label='Waiting for the next training bar' if mode in BAR_MODES else 'Waiting for the next circle' if mode=='Ren/Ten' else 'Waiting for the next key prompt'
+                    self.focus_info.set(label)
+                    self._preview_dirty=True
+            else:
+                self._last_preview=payload;self._preview_dirty=True
         except queue.Empty:
             pass
+        if self._preview_dirty and self._last_preview is not None:self.render_preview()
         while True:
             try:
                 kind,value=self.metrics.get_nowait()
@@ -1443,7 +2093,7 @@ class App:
                 self.stat_labels[2].configure(text=value['action'])
                 self.scan_info.set(f"{self.training} {'tracking' if value['tracked'] else 'searching'}  •  {value['fps']:.0f} fps")
                 self.color_info.set('Indicator tracked' if value['tracked'] else 'Waiting for bar')
-                self.color_label.configure(fg='#63e5bf' if value['tracked'] else '#98a7bc')
+                self.color_label.configure(fg=self.colors[4] if value['tracked'] else self.colors[3])
             elif self.training!='Ren/Ten':
                 continue
             elif kind=='feedback_status':
@@ -1464,25 +2114,36 @@ class App:
                 self.feedback_info.set(('Automatic feedback: ' if self.config.get('auto_feedback',True) else 'Manual feedback: ')+text)
         active=self.running.is_set()
         mode_name=self.training
-        self.badge.configure(text=f'  {mode_name} / '+('RUNNING  ' if active else 'PAUSED  '),fg='#63e5bf' if active else '#98a7bc')
+        self.badge.configure(text=f'  {mode_name} | '+('RUNNING  ' if active else 'PAUSED  '),fg=self.colors[4] if active else self.colors[3])
         if self.capture_error:
-            self.badge.configure(text='  ERROR / INPUT STOPPED  ',fg='#ffaf8a')
+            self.badge.configure(text='  ERROR | INPUT STOPPED  ',fg='#ffaf8a')
             self.status.set('ERROR: '+self.capture_error+'. Restart the macro after correcting this.')
             self.scan_info.set('Stopped — see Activity')
         if not active and self.status.get().startswith('Running'):
             self.status.set('Input PAUSED. Live tracking continues. Focus Roblox and press the start key to resume.')
+        self.sync_compact_data()
         while True:
             try:
                 event=self.events.get_nowait()
             except queue.Empty:
                 break
+            if isinstance(event,dict) and event.get('type')=='bar_activity':
+                self.render_bar_activity(event);continue
             self.log.configure(state='normal')
             self.log.insert('end',time.strftime('%H:%M:%S ')+event+'\n')
             self.log.see('end')
             self.log.configure(state='disabled')
+            self.compact_log.configure(state='normal')
+            self.compact_log.insert('end',time.strftime('%H:%M:%S ')+event+'\n')
+            self.compact_log.see('end');self.compact_log.configure(state='disabled')
         self.root.after(20,self.pump)
 
     def close(self):
+        self.close_training_menu()
+        if self._position_restore_job is not None:self.root.after_cancel(self._position_restore_job)
+        if self._position_job is not None:self.root.after_cancel(self._position_job);self._position_job=None
+        self._position_restoring=False
+        self.remember_window_position()
         self.pause()
         self.closed.set()
         self.window_capture.close()

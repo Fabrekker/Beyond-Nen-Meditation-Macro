@@ -1,13 +1,15 @@
-**[Download nen-macro-1.0.8.zip](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.8/nen-macro-1.0.8.zip)**
+# Mostly quality-of-life improvements
 
-**Extract All first**, then open **Start Macro.exe**. Keep the App folder beside both launchers.
+**[Download nen-macro-1.0.9.zip](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/releases/download/v1.0.9/nen-macro-1.0.9.zip)**
 
-### What's new
+This release focuses mostly on making the macro clearer, more comfortable, and easier to use.
 
-- All currently known Nen techniques are now implemented and should work with their matching training mode. If you run into any issues, please [let us know](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/issues).
-- Ko is now **Ko/RyuS/RyuD**, covering Ko, Ryu Strength, and Ryu Defense while preserving saved control preferences.
-- Meditation startup guidance now appears with the top instructions on every tab and refers to your configured start keybind.
+- Compact view with light/dark themes and Always on top.
+- Steadier live previews and saved window positions.
+- Less activity spam and improved En prompt detection.
 
-Close the macro and use **Update Macro** to install this release, or download the ZIP above. Saved settings are preserved. The `.pkg` and `update.json` assets are used automatically by the updater.
+**Extract All** before opening **Start Macro.exe**. Keep the App folder beside both launchers. Existing users can close the macro and run **Update Macro.exe**; saved settings are preserved.
 
-Requirements and official download links are in the README. Created with AI assistance.
+Requirements are unchanged and linked in the README. The `.pkg` and `update.json` assets are for the automatic updater; the ZIP above is the manual download. Created with AI assistance.
+
+If you run into an issue, please [let us know](https://github.com/Fabrekker/Beyond-Nen-Meditation-Macro/issues).
