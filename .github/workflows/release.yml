@@ -38,16 +38,11 @@ jobs:
         run: |
           TAG="v$RELEASE_VERSION"
           TITLE="Beyond Nen Macro $RELEASE_VERSION"
-          SUMMARY=$(head -n 1 RELEASE_NOTES.md | tr -d '\r')
-          if [[ "$SUMMARY" == "# "* ]]; then
-            TITLE="$TITLE - ${SUMMARY:2}"
-          fi
           if gh release view "$TAG" --json isDraft > release-state.json 2>/dev/null; then
             if python -c 'import json,sys; sys.exit(0 if json.load(open("release-state.json"))["isDraft"] else 1)'; then
               echo "Resuming the existing draft release."
             else
-              echo "This version is already published. Increase version.json for a new release."
-              exit 0
+              echo "Refreshing the published release files and text."
             fi
           else
             gh release create "$TAG" --draft --target "$GITHUB_SHA" \

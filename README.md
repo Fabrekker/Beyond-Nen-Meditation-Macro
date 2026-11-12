@@ -1,6 +1,6 @@
 # Beyond Nen Meditation Macro
 
-A Windows macro for Beyond Nen meditation training on Roblox, created with AI assistance.
+A Windows macro for Beyond Nen meditation training on Roblox.
 
 > **IMPORTANT - Extract All before launching:** right-click the downloaded ZIP, choose **Extract All**, then run **Start Macro.exe** inside the extracted folder. Keep all files together. Running the launcher inside the ZIP causes the missing `bootstrap.py` error.
 
@@ -13,7 +13,7 @@ A Windows macro for Beyond Nen meditation training on Roblox, created with AI as
 >
 > Beyond Nen Meditation Macro is a community-made tool designed specifically for Beyond Nen training, with privacy in mind. Gameplay images are processed locally, and the macro does not request your Roblox login or upload images, settings, or logs. The source code is publicly available here if you'd like to review how it works.
 
-## What is new - v1.0.9: Mostly quality-of-life improvements
+## What is new - v1.0.9
 
 - Compact view with light/dark themes and Always on top.
 - Steadier live previews and saved window positions.
